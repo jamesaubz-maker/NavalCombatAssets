@@ -1,0 +1,3336 @@
+<!-- 
+  VERSION HISTORY
+
+  v17.2 - 2025-11-08 (Bug Fix):
+  - Fixed "ReferenceError: updateScore is not defined".
+  - Restored the 'updateScore' function which was
+    accidentally deleted during the v17.1 refactor.
+
+  v17.1 - 2025-11-08 (Polish & Bug Fix):
+  - Fixed Fighter Jet icon rotation. 'FighterJet.draw()' was
+    using a 0=North compass rotation, but its 'Blip.move()'
+    physics use a 0=East math rotation.
+  - Fighter Jet icon now rotates correctly to match its heading.
+  - Removed the radar sweep ('drawSweep()') and blip fading
+    ('blip.update()') from the game loop for a cleaner,
+    real-time tactical display.
+
+  v17.0 - 2025-11-08 (Carrier Command - Phase 3):
+  - Implemented full Fighter Jet (CAP) logic.
+  - Created new 'FighterJet' class inheriting from 'Blip'.
+    - New icon (cyan caret '^').
+    - New AI states: 'patrolling', 'engaging', 'returning', 'refueling'.
+    - New properties: 'fuel', 'ammo', 'radarRange', 'jetId', 'jetState'.
+  - 'handleSectorCommand' now handles 'jet' launch and re-tasking.
+    - 'Ready' jets spawn at carrier and fly to assigned sector.
+    - 'Patrolling' jets can be re-tasked.
+  - 'FighterJet.move()' now manages AI states:
+    - 'patrol()': Circles the assigned sector.
+    - 'returning()': Flies to carrier, "lands" (despawns), and starts refuel.
+  - 'FighterJet.findTarget()': New logic uses 'radarRange' to find targets.
+  - 'FighterJet.fireMissile()': New logic uses limited 'ammo'.
+  - Resource Management:
+    - Added 'fighterWingTimer' (1-second interval) to 'animate()'.
+    - This timer manages 'fuel' and 'refuelTimer' for all jets.
+    - 'fighterWing' array now tracks 'jetState', 'fuel', 'ammo', etc.
+  - 'updateFlightWingPanel()' is now fully dynamic, showing fuel,
+    ammo, and refueling timers.
+
+  v16.1 - 2025-11-08 (Bug Fix):
+  - Fixed "ReferenceError: returnToStartScreen is not defined".
+  - Restored the 'returnToStartScreen' function which was
+    accidentally deleted during the v15.0 refactor.
+  - Added 'AudioManager.play('click')' to this function.
+
+  v16.0 - 2025-11-08 (Carrier Command - Phase 2):
+  - Implemented Sector Command logic.
+  - Added new helper functions: 'getCoordsFromSector' (e.g., "A1" -> {x,y})
+    and 'getSectorFromCoords' (e.g., {x,y} -> "A1").
+  - Added new 'handleSectorCommand' event handler. Pressing "Enter" in
+    a sector input now issues a command.
+  - Ship commands are now functional: Assigning a sector (e.g., "C3") to
+    a ship and pressing Enter will update its 'targetCourse' and
+    'targetDistance', causing it to move via its 'holdStation()' AI.
+  - 'updateNavigationPanel()' and 'updateFlightWingPanel()' now attach
+    the 'onkeyup' event listener to the new inputs.
+  - The sector inputs now display the unit's *current* sector.
+  - The sector input is now disabled if a ship is destroyed.
+  - Renamed 'carrierFighters' to 'fighterWing' for clarity.
+  - Updated 'startGame()' to set 'assignedSector' for fighters.
+
+  v15.0 - 2025-11-08 (Carrier Command - Phase 1):
+  - Renamed game to "Naval Combat AI" (this was missed in v11).
+  - Re-titled all files to 'Naval Combat AI'.
+  - drawGrid(): Replaced N/E/S/W labels with A-H Sector labels.
+  - drawGrid(): Added 1-4 Ring labels.
+  - HTML: Added new 'flight-wing-panel' to the left column.
+  - CSS: Added styles for 'flight-wing-panel' and new '.sector-input'.
+  - JS: Removed old ship navigation functions (handleNavToggle, etc.)
+    and global event listeners (wheel, keydown).
+  - updateNavigationPanel(): Reworked to show a 'sector-input' box
+    instead of the old 'ADJUST' button.
+  - JS: Added new 'flightWingListContent' global.
+  - JS: Added 'carrierFighters' array and 'fighterStats' object.
+  - startGame(): Now initializes the 'carrierFighters' array based
+    on 'gameConfig.fighterStats' (defaults to 2 jets).
+  - animate(): Added call to new 'updateFlightWingPanel()'.
+
+  v14.7 - 2025-11-07 (Refactor):
+  - Removed "Oil Tanker" (Merchant) ship class from all game logic.
+  - Removed from fallback stats in 'Blip' constructor.
+  - Removed from 'showGameSummary' bonus calculation.
+  - Removed from 'updateWeaponsControlPanel' logic.
+
+  (Omitted v14.6 and earlier for brevity)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Naval Combat AI v17.2</title>
+    
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            overflow: hidden;
+            background-color: #000c00;
+            font-family: 'Orbitron', sans-serif;
+            color: #00ff41;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&display=swap');
+
+        h1 {
+            font-weight: 400;
+            font-size: 1.5rem;
+            letter-spacing: 2px;
+            text-shadow: 0 0 10px #00ff41, 0 0 20px #00ff41;
+            margin: 10px 0;
+            text-align: center;
+        }
+        
+        .version-display {
+            font-size: 0.8rem;
+            font-weight: 400;
+            color: #555;
+            margin-left: 10px;
+            text-shadow: none;
+        }
+        #game-title .version-display {
+            color: #004f14; /* Dim in-game */
+        }
+
+        /* --- NEW: v10.8 Game Controls --- */
+        #game-controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+            display: flex;
+            gap: 10px;
+        }
+        .game-control-button {
+            background: #000c00;
+            color: #00ffff;
+            border: 1px solid #00ffff;
+            padding: 5px 10px;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.9rem;
+            cursor: pointer;
+            border-radius: 5px;
+            box-shadow: 0 0 10px #00ffff inset;
+            transition: all 0.2s ease;
+        }
+        .game-control-button:hover {
+            background: #00ffff;
+            color: #000c00;
+            box-shadow: 0 0 15px #00ffff;
+        }
+        #exit-button {
+            color: #ff4141;
+            border-color: #ff4141;
+            box-shadow: 0 0 10px #ff4141 inset;
+        }
+        #exit-button:hover {
+            background: #ff4141;
+            color: #000c00;
+            box-shadow: 0 0 15px #ff4141;
+        }
+        /* --- End v10.8 --- */
+
+
+        #radar-container {
+            width: 95vw;
+            height: 95vh;
+            max-width: 1200px;
+            max-height: 1200px;
+            position: relative;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            filter: blur(0.5px);
+            cursor: default;
+        }
+
+        /* --- NEW: v14.0 Video Player --- */
+        #video-comms-window {
+            display: none; /* Hidden by default */
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            width: 280px; /* 16:9 aspect ratio */
+            height: 157.5px;
+            background: #000;
+            border: 2px solid #00ffff;
+            box-shadow: 0 0 20px #00ffff;
+            z-index: 20;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        #video-player {
+            width: 100%;
+            height: 100%;
+        }
+        /* --- End v14.0 --- */
+
+        /* --- Left Column Container --- */
+        #left-column {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 270px;
+            height: 90vh;
+            max-height: 900px;
+            
+            background: rgba(0, 20, 0, 0.75);
+            border: 1px solid #00ff41;
+            padding: 10px 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 15px #00ff41 inset;
+            z-index: 10;
+            
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            overflow-y: auto;
+        }
+
+        /* Base styles for all panels inside the left column */
+        #left-column .panel-section {
+            padding-bottom: 10px;
+            border-bottom: 1px dashed #004f14;
+        }
+        #left-column .panel-section:last-child {
+            border-bottom: none;
+        }
+
+        #left-column h2 {
+            margin: 10px 0;
+            font-size: 1rem;
+            text-shadow: 0 0 5px #00ff41;
+            text-align: center;
+        }
+        #left-column p {
+            margin: 5px 0;
+            font-size: 0.9rem;
+        }
+        #left-column span {
+            font-weight: 700;
+            min-width: 50px;
+            display: inline-block;
+            text-align: right;
+            padding-right: 10px;
+        }
+
+        /* --- Data Panel (Mission Data) --- */
+        #data-panel .mission-data-row {
+            display: flex;
+            justify-content: space-between;
+        }
+        #data-panel .mission-data-row span {
+            text-align: left;
+            padding-right: 0;
+        }
+        #data-panel .mission-data-row span:last-child {
+            text-align: right;
+            font-weight: 700;
+            color: #ffff00;
+        }
+
+
+        /* --- Weapons & Navigation Panel Shared Styles --- */
+        #weapons-control-panel, #ship-navigation-panel {
+            max-height: none;
+        }
+        #weapons-list-content p, #navigation-list-content p {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap; /* Allow controls to wrap */
+            gap: 5px; /* Space between items if they wrap */
+        }
+        .status-good { color: #00ff41; }
+        .status-damaged { color: #ffff00; }
+        .status-critical { color: #ff9900; }
+        .status-destroyed { color: #ff4141; }
+        .status-ammo { color: #00ffff; }
+        
+        /* --- Ship Fire Button --- */
+        .ship-fire-button {
+            background: #555;
+            color: #999;
+            border: 1px solid #555;
+            padding: 3px 6px;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.8rem;
+            cursor: not-allowed;
+            border-radius: 3px;
+            text-transform: uppercase;
+            margin-left: 10px;
+            min-width: 80px;
+            text-align: center;
+        }
+        .ship-fire-button.ready {
+            background: #ff4141;
+            color: #000c00;
+            border-color: #ff4141;
+            cursor: pointer;
+            box-shadow: 0 0 8px #ff4141;
+        }
+        .ship-fire-button.ready:hover {
+            background: #ff7373;
+        }
+        .ship-fire-button.reloading {
+            background: #555;
+            color: #ffff00;
+            border-color: #555;
+            font-size: 0.7rem;
+        }
+        
+        /* --- REMOVED: Phase 9.5 Navigation Controls --- */
+        
+        /* --- NEW: v15.0 Carrier Command Styles --- */
+        #flight-wing-panel {
+            max-height: none; /* or a specific max-height */
+        }
+        #flight-wing-list-content p {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 5px;
+        }
+        .sector-controls-group {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+        .sector-controls-group span {
+            font-size: 0.8rem;
+            color: #aaa;
+            font-weight: 400;
+            padding-right: 5px;
+            min-width: auto;
+        }
+        .sector-input {
+            background: #021a02;
+            border: 1px solid #004f14;
+            color: #00ff41;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.9rem;
+            width: 40px; /* A1, B2, etc. */
+            padding: 2px 5px;
+            border-radius: 3px;
+            text-align: center;
+            text-transform: uppercase;
+        }
+        .sector-input:focus {
+            outline: none;
+            border-color: #00ffff;
+            box-shadow: 0 0 10px #00ffff;
+        }
+        .sector-input:disabled {
+            background: #111;
+            border-color: #333;
+            color: #555;
+            cursor: not-allowed;
+        }
+        /* --- End v15.0 --- */
+        
+
+        /* --- REMOVED: Enemy Intel Panel CSS --- */
+
+
+        /* Base Modal Style */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 99;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+        }
+        .modal-content {
+            background: #000c00;
+            border: 2px solid #00ff41;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 0 25px #00ff41;
+            max-width: 500px;
+            width: 90%;
+        }
+        .modal-content h1 {
+            margin-top: 0;
+            color: #00ff41;
+            text-shadow: 0 0 10px #00ff41;
+        }
+        .modal-button {
+            background: #00ff41;
+            color: #000c00;
+            border: none;
+            padding: 10px 20px;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1rem;
+            cursor: pointer;
+            border-radius: 5px;
+            text-transform: uppercase;
+            margin-top: 10px;
+            box-shadow: 0 0 10px #00ff41;
+        }
+        .modal-button:hover {
+            background: #5eff8d;
+        }
+        .modal-button:disabled {
+            background: #555;
+            color: #999;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+
+        /* Styles for text inputs */
+        .modal-input-group {
+            margin: 15px 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .modal-input-group label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            color: #aaa;
+            margin-bottom: 5px;
+        }
+        .modal-input {
+            background: #021a02;
+            border: 1px solid #00ff41;
+            color: #00ff41;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1rem;
+            padding: 8px 12px;
+            border-radius: 3px;
+            text-align: center;
+            width: 80%;
+            box-shadow: 0 0 10px #00ff41 inset;
+        }
+        .modal-input:focus {
+            outline: none;
+            box-shadow: 0 0 15px #00ff41;
+        }
+
+        /* Start Modal */
+        #start-modal {
+            display: flex;
+        }
+        #start-modal-content {
+            background: #000c00;
+            border: 2px solid #00ff41;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 0 25px #00ff41;
+            max-width: 500px;
+            width: 90%;
+        }
+        #start-modal-content h1 {
+             margin-top: 0;
+            color: #00ff41;
+            text-shadow: 0 0 10px #00ff41;
+        }
+        
+        #loading-status {
+            font-size: 0.9rem;
+            color: #ffff00;
+            text-shadow: 0 0 8px #ffff00;
+            height: 20px;
+            margin: 10px 0 0 0;
+        }
+
+        /* Passcode Section */
+        #passcode-section {
+            width: 100%;
+            margin-top: 10px;
+        }
+        #passcode-status {
+            font-size: 0.9rem;
+            color: #ffff00;
+            height: 18px;
+            margin-top: 5px;
+        }
+
+        /* Player Info Section */
+        #player-info-section {
+            width: 100%;
+            margin-top: 15px;
+            border-top: 1px dashed #004f14;
+            padding-top: 15px;
+        }
+
+        /* News Ticker */
+        #news-ticker-container {
+            width: 100%;
+            height: 20px;
+            background: #000;
+            border: 1px solid #004f14;
+            border-radius: 3px;
+            overflow: hidden;
+            position: relative;
+            margin: 15px 0 0 0;
+        }
+        #news-ticker {
+            display: inline-block;
+            white-space: nowrap;
+            position: absolute;
+            left: 100%;
+            padding-right: 100%; /* Ensures seamless loop */
+            font-size: 0.9rem;
+            color: #ffff00;
+            animation: ticker-scroll 30s linear infinite;
+        }
+        @keyframes ticker-scroll {
+            0% { transform: translateX(0%); }
+            100% { transform: translateX(-100%); }
+        }
+        #news-ticker span {
+            margin-right: 50px; /* Space between items */
+        }
+        
+        #difficulty-select {
+            display: none; /* Hidden until passcode is correct */
+            flex-direction: column;
+            gap: 15px;
+            margin-top: 25px;
+        }
+
+        #player-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-top: 10px;
+        }
+        #leaderboard-button {
+             background: #000c00;
+            color: #00ffff;
+            border: 1px solid #00ffff;
+            padding: 8px 15px;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 0.9rem;
+            cursor: pointer;
+            border-radius: 5px;
+            text-transform: uppercase;
+            box-shadow: 0 0 10px #00ffff inset;
+            transition: all 0.2s ease;
+        }
+        #leaderboard-button:hover {
+            background: #00ffff;
+            color: #000c00;
+            box-shadow: 0 0 15px #00ffff;
+        }
+
+
+        .difficulty-button {
+            background: #000c00;
+            color: #00ff41;
+            border: 1px solid #00ff41;
+            padding: 10px 20px;
+            font-family: 'Orbitron', sans-serif;
+            font-size: 1rem;
+            cursor: pointer;
+            border-radius: 5px;
+            text-transform: uppercase;
+            box-shadow: 0 0 10px #00ff41 inset;
+            transition: all 0.2s ease;
+        }
+        .difficulty-button:hover {
+            background: #00ff41;
+            color: #000c00;
+            box-shadow: 0 0 15px #00ff41;
+        }
+        .difficulty-button:disabled {
+            color: #555;
+            border-color: #555;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+        .difficulty-button:disabled:hover {
+            background: #000c00;
+            color: #555;
+        }
+
+        #start-easy:hover { background: #5eff8d; border-color: #5eff8d; box-shadow: 0 0 15px #5eff8d;}
+        #start-medium:hover { background: #ffff00; border-color: #ffff00; color: #000c00; box-shadow: 0 0 15px #ffff00;}
+        #start-hard:hover { background: #ff4141; border-color: #ff4141; color: #000c00; box-shadow: 0 0 15px #ff4141;}
+
+
+        /* Win/Lose Modals */
+        #win-modal { }
+        #win-modal-content { }
+        #game-over-modal { }
+        #game-over-modal-content {
+            background: #000c00;
+            border: 2px solid #ff4141;
+            padding: 40px;
+            border-radius: 10px;
+            box-shadow: 0 0 25px #ff4141;
+            max-width: 500px;
+            width: 90%;
+        }
+        #game-over-modal-content h1 {
+            margin-top: 0;
+            color: #ff4141;
+            text-shadow: 0 0 10px #ff4141;
+        }
+
+        .submit-status {
+            font-size: 0.9rem;
+            color: #ffff00;
+            text-shadow: 0 0 8px #ffff00;
+            height: 18px;
+            margin-top: 15px;
+        }
+
+        /* Leaderboard Modal */
+        #leaderboard-modal { } /* Uses .modal */
+        #leaderboard-modal-content {
+            max-width: 600px;
+        }
+        #leaderboard-table {
+            width: 100%;
+            margin-top: 20px;
+            border-collapse: collapse;
+            text-align: left;
+        }
+        #leaderboard-table th, #leaderboard-table td {
+            padding: 8px 12px;
+            border-bottom: 1px dashed #004f14;
+            font-size: 0.9rem;
+        }
+        #leaderboard-table th {
+            color: #aaa;
+            text-transform: uppercase;
+        }
+        #leaderboard-table td:nth-child(3) { /* Score */
+            font-weight: 700;
+            color: #ffff00;
+        }
+        #leaderboard-table tr:first-child td { /* Top score row */
+            color: #00ff41;
+            font-size: 1rem;
+        }
+        #leaderboard-status {
+            font-size: 0.9rem;
+            color: #ffff00;
+            height: 18px;
+            margin-top: 10px;
+        }
+
+        /* --- NEW: v10.8 Pause Modal --- */
+        #pause-modal-content {
+            border: 2px solid #ffff00;
+            box-shadow: 0 0 25px #ffff00;
+        }
+        #pause-modal-content h1 {
+            color: #ffff00;
+            text-shadow: 0 0 10px #ffff00;
+        }
+
+
+        /* Summary Panel Styles */
+        .summary-panel {
+            text-align: left;
+            margin-top: 20px;
+            border-top: 1px dashed #00ff41;
+            padding-top: 15px;
+        }
+        .summary-panel p {
+            font-size: 1rem;
+            margin: 8px 0;
+            display: flex;
+            justify-content: space-between;
+        }
+        .summary-panel p span:first-child {
+            color: #aaa;
+            font-weight: 400;
+            text-align: left;
+        }
+        .summary-panel p span:last-child {
+            font-weight: 700;
+            text-align: right;
+            min-width: 100px;
+        }
+        .summary-points-gain {
+            color: #00ff41;
+        }
+        .summary-points-loss {
+            color: #ff4141;
+        }
+        .summary-points-bonus {
+            color: #00ffff;
+        }
+
+        .hidden {
+            display: none;
+        }
+        .game-ui {
+            display: none;
+        }
+
+    </style>
+</head>
+<body>
+
+    <!-- --- NEW: v14.0 Media Elements --- -->
+    <!-- v14.6: Added crossorigin="anonymous" -->
+    <audio id="audio-ambiance" loop crossorigin="anonymous"></audio>
+
+    <div id="video-comms-window" class="game-ui">
+        <!-- v14.6: Added crossorigin="anonymous" -->
+        <video id="video-player" muted playsinline crossorigin="anonymous"></video>
+    </div>
+    <!-- --- End v14.0 --- -->
+
+
+    <div id="start-modal" class="modal">
+        <div id="start-modal-content">
+            <h1>NAVAL COMBAT AI <span class="version-display">v17.2</span></h1>
+
+            <!-- NEW: News Ticker -->
+            <div id="news-ticker-container">
+                <div id="news-ticker"></div>
+            </div>
+
+            <!-- MODIFIED: Loading status -->
+            <p id="loading-status">LOADING MISSION DATA...</p>
+
+            <!-- NEW: Passcode Section -->
+            <div id="passcode-section">
+                <div class="modal-input-group">
+                    <label for="passcode-input">ENTER PASSCODE</label>
+                    <input type="password" id="passcode-input" class="modal-input">
+                </div>
+                <button id="passcode-submit" class="modal-button" style="width: 80%;" disabled>AUTHORIZE</button>
+                <p id="passcode-status"></p>
+            </div>
+            
+            <!-- NEW: Player Info Section (was top level) -->
+            <div id="player-info-section" class="hidden">
+                <div class="modal-input-group">
+                    <label for="player-name-input">ENTER CALLSIGN</label>
+                    <input type="text" id="player-name-input" class="modal-input">
+                </div>
+                <div id="player-buttons">
+                    <button id="leaderboard-button">LEADERBOARD</button>
+                    <!-- Add more buttons here, like 'Service Record' -->
+                </div>
+            </div>
+
+            <!-- MODIFIED: Hidden by default -->
+            <div id="difficulty-select">
+                <p>SELECT MISSION DIFFICULTY</p>
+                <button id="start-easy" class="difficulty-button" disabled>EASY</button>
+                <button id="start-medium" class="difficulty-button" disabled>MEDIUM</button>
+                <button id="start-hard" class="difficulty-button" disabled>HARD</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- --- NEW: Left Column Wrapper --- -->
+    <div id="left-column" class="game-ui">
+
+        <!-- --- Panel 1 (Mission Data) --- -->
+        <div id="data-panel" class="panel-section">
+            <h2>MISSION DATA</h2>
+            <p class="mission-data-row">
+                <span>WAVE:</span> 
+                <span id="wave-readout">-- / --</span>
+            </p>
+            <p class="mission-data-row">
+                <span>HOSTILES:</span> 
+                <span id="hostiles-readout">--</span>
+            </p>
+            <h2>SCORE: <span id="data-score">0</span></h2>
+        </div>
+
+        <!-- --- Panel 2 (Weapons Control) --- -->
+        <div id="weapons-control-panel" class="panel-section">
+            <h2>WEAPONS CONTROL</h2>
+            <div id="weapons-list-content">
+                <!-- JS will populate this -->
+            </div>
+        </div>
+        
+        <!-- --- NEW: Panel 3 (Ship Navigation) --- -->
+        <div id="ship-navigation-panel" class="panel-section">
+            <h2>SHIP NAVIGATION</h2>
+            <div id="navigation-list-content">
+                <!-- JS will populate this -->
+            </div>
+        </div>
+        
+        <!-- --- NEW: v15.0 Flight Wing Panel --- -->
+        <div id="flight-wing-panel" class="panel-section">
+            <h2>FLIGHT WING</h2>
+            <div id="flight-wing-list-content">
+                <!-- JS will populate this -->
+            </div>
+        </div>
+        
+        <!-- --- REMOVED: Enemy Intel Panel --- -->
+        
+        <!-- --- REMOVED: Enemy Stats Panel --- -->
+
+    </div> <!-- --- END: Left Column --- -->
+
+
+    <div id="win-modal" class="modal">
+        <div id="win-modal-content" class="modal-content">
+            <h1>MISSION COMPLETE</h1>
+            <p style="font-size: 1.2rem;">FINAL SCORE: <span id="final-score">0</span></p>
+            <div id="win-summary" class="summary-panel">
+                <!-- JS will populate this -->
+            </div>
+            <p id="win-submit-status" class="submit-status"></p>
+            <button id="submit-score-win" class="modal-button">SUBMIT SCORE</button>
+            <button id="restart-button-win" class="modal-button hidden">NEW MISSION</button>
+        </div>
+    </div>
+
+    <div id="game-over-modal" class="modal">
+        <div id="game-over-modal-content">
+            <h1>MISSION FAILED</h1>
+            <p style="font-size: 1.2rem;">FINAL SCORE: <span id="game-over-score">0</span></p>
+            <div id="lose-summary" class="summary-panel">
+                <!-- JS will populate this -->
+            </div>
+            <p id="lose-submit-status" class="submit-status"></p>
+            <button id="submit-score-lose" class="modal-button">SUBMIT SCORE</button>
+            <button id="restart-button-lose" class="modal-button hidden">NEW MISSION</button>
+        </div>
+    </div>
+
+    <div id="leaderboard-modal" class="modal">
+        <div id="leaderboard-modal-content" class="modal-content">
+            <h1>LEADERBOARD</h1>
+            <p id="leaderboard-status">Loading top scores...</p>
+            <table id="leaderboard-table">
+                <!-- JS will populate this -->
+            </table>
+            <button id="leaderboard-close-button" class="modal-button">CLOSE</button>
+        </div>
+    </div>
+
+    <!-- --- NEW: v10.8 Pause Modal --- -->
+    <div id="pause-modal" class="modal">
+        <div id="pause-modal-content" class="modal-content">
+            <h1>GAME PAUSED</h1>
+            <button id="resume-button" class="modal-button">RESUME</button>
+        </div>
+    </div>
+
+    <!-- --- NEW: v10.8 Game Controls --- -->
+    <div id="game-controls" class="game-ui">
+        <button id="pause-button" class="game-control-button">PAUSE</button>
+        <!-- v10.11: Fixed typo 'classs' -->
+        <button id="exit-button" class="game-control-button">EXIT</button>
+    </div>
+
+
+    <h1 id="game-title" class="game-ui">TARGET TRACKING <span class="version-display">v17.2</span></h1>
+    
+    <div id="radar-container" class="game-ui">
+        <canvas id="radarCanvas"></canvas>
+    </div>
+
+    <script>
+        // --- NEW: v17.3 - Add ES6 Polyfill for Array.prototype.find ---
+        if (!Array.prototype.find) {
+            Object.defineProperty(Array.prototype, 'find', {
+                value: function(predicate) {
+                    if (this == null) {
+                        throw new TypeError('"this" is null or not defined');
+                    }
+                    var o = Object(this);
+                    var len = o.length >>> 0;
+                    if (typeof predicate !== 'function') {
+                        throw new TypeError('predicate must be a function');
+                    }
+                    var thisArg = arguments[1];
+                    var k = 0;
+                    while (k < len) {
+                        var kValue = o[k];
+                        if (predicate.call(thisArg, kValue, k, o)) {
+                            return kValue;
+                        }
+                        k++;
+                    }
+                    return undefined;
+                },
+                configurable: true,
+                writable: true
+            });
+        }
+        // --- END: v17.3 Polyfill ---
+
+
+        var canvas = document.getElementById('radarCanvas');
+        var ctx = canvas.getContext('2d');
+        var container = document.getElementById('radar-container');
+
+        // --- Configurable Radar Properties ---
+        var radarColor = '#00ff41';
+        var radarColorDim = '#004f14';
+        var radarBgColor = '#021a02';
+        var lockSquareSize = 12;
+        
+        var missileHitRadius = 16;
+        var enemyMissileHitRadius = 10;
+        var defensiveMissileHitRadius = 10;
+        var playerSeekerActivationRadius = 50;
+        var enemySeekerActivationRadius = 40;
+        var defensiveSeekerActivationRadius = 30;
+
+        // --- Get Data Panel Elements ---
+        var dataPanel = document.getElementById('data-panel');
+        var dataScore = document.getElementById('data-score');
+        
+        var waveReadout = document.getElementById('wave-readout');
+        var hostilesReadout = document.getElementById('hostiles-readout');
+        
+        // --- Get Fleet Status Panel ---
+        var weaponsListContent = document.getElementById('weapons-list-content');
+        
+        // --- NEW: Phase 3 Navigation Panel ---
+        var navigationListContent = document.getElementById('navigation-list-content');
+        
+        // --- NEW: v15.0 ---
+        var flightWingListContent = document.getElementById('flight-wing-list-content');
+        
+        // --- Get Modal Elements ---
+        var winModal = document.getElementById('win-modal');
+        var finalScoreDisplay = document.getElementById('final-score');
+        var winSummaryPanel = document.getElementById('win-summary');
+        
+        var gameOverModal = document.getElementById('game-over-modal');
+        var gameOverScoreDisplay = document.getElementById('game-over-score');
+        var loseSummaryPanel = document.getElementById('lose-summary');
+
+        var submitScoreWinButton = document.getElementById('submit-score-win');
+        var restartButtonWin = document.getElementById('restart-button-win');
+        var winSubmitStatus = document.getElementById('win-submit-status');
+        
+        var submitScoreLoseButton = document.getElementById('submit-score-lose');
+        var restartButtonLose = document.getElementById('restart-button-lose');
+        var loseSubmitStatus = document.getElementById('lose-submit-status');
+
+        // --- Get Start Modal Elements ---
+        var startModal = document.getElementById('start-modal');
+        var loadingStatus = document.getElementById('loading-status');
+        var newsTicker = document.getElementById('news-ticker');
+        
+        var passcodeSection = document.getElementById('passcode-section');
+        var passcodeSubmit = document.getElementById('passcode-submit');
+        var passcodeStatus = document.getElementById('passcode-status');
+        var passcodeInput = document.getElementById('passcode-input');
+        
+        var playerInfoSection = document.getElementById('player-info-section');
+        var playerNameInput = document.getElementById('player-name-input');
+        
+        var difficultySelect = document.getElementById('difficulty-select');
+        var startEasyButton = document.getElementById('start-easy');
+        var startMediumButton = document.getElementById('start-medium');
+        var startHardButton = document.getElementById('start-hard');
+        var gameUiElements = document.querySelectorAll('.game-ui');
+        
+        var leaderboardModal = document.getElementById('leaderboard-modal');
+        var leaderboardButton = document.getElementById('leaderboard-button');
+        var leaderboardCloseButton = document.getElementById('leaderboard-close-button');
+        var leaderboardStatus = document.getElementById('leaderboard-status');
+        var leaderboardTable = document.getElementById('leaderboard-table');
+        
+        var pauseModal = document.getElementById('pause-modal');
+        var pauseButton = document.getElementById('pause-button');
+        var resumeButton = document.getElementById('resume-button');
+        var exitButton = document.getElementById('exit-button');
+        
+        var gameTitle = document.getElementById('game-title');
+        
+        var center = { x: 0, y: 0 };
+        var radius = 0;
+        var blips = [];
+        var projectiles = [];
+        
+        // Game state variables
+        var score = 0;
+        var gameActive = false;
+        var isPaused = false;
+        var fleetComposition = [];
+        
+        var shipIdCounter = 1; 
+        var enemyIdCounter = 1;
+        var friendlyFleet = []; 
+        var enemyIntelList = [];
+        var carrierBlip = null; 
+
+        // Stats Tracking Variables
+        var playerMissilesFired = 0;
+        var pointsGained = 0;
+        var pointsLost = 0;
+        
+        var waveConfig = [];
+        var squadronWaveConfig = [];
+        var currentWave = 0;
+        var totalWaves = 0;
+        var enemiesLeftInWave = 0;
+        
+        var fighterWing = [];
+        var fighterStats = {};
+        
+        var fighterWingTimer = 0;
+        
+        var SECTOR_ANGLES = {
+            'C': 0, 'B': 45, 'A': 90, 'H': 135,
+            'G': 180, 'F': 225, 'E': 270, 'D': 315
+        };
+        var SECTOR_NAMES = ['C', 'B', 'A', 'H', 'G', 'F', 'E', 'D'];
+
+        // ==========================================================
+        // === PASTE YOUR GOOGLE APPS SCRIPT URL ON THE LINE BELOW ===
+        // ==========================================================
+        var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbynTHHu2Xe8SVavnqYwDpPg2uulD82U3zeThu0Tmtdnfaj1gpVbfwLJpg2FAqdoyBM/exec';
+        // ==========================================================
+        // ==========================================================
+
+        var ASSET_BASE_URL = 'https://raw.githubusercontent.com/jamesaubz-maker/NavalCombatAssets/main/';
+
+        // --- NEW: v14.0 Audio Manager (ES5 COMPATIBLE) ---
+        var AudioManager = {
+            audioPool: [],
+            soundSources: {},
+            poolSize: 8,
+            
+            init: function() {
+                for (var i = 0; i < this.poolSize; i++) {
+                    var audio = new Audio();
+                    audio.volume = 0.5;
+                    audio.crossOrigin = "anonymous";
+                    audio.isReady = true;
+                    audio.onended = function() {
+                        this.isReady = true;
+                    };
+                    audio.onerror = function() {
+                        this.isReady = true;
+                    };
+                    this.audioPool.push(audio);
+                }
+
+                this.soundSources['missile_fire'] = ASSET_BASE_URL + 'missile_fire (3).mp3';
+                this.soundSources['explosion_small'] = ASSET_BASE_URL + 'explosion_small.mp3';
+                this.soundSources['explosion_large'] = ASSET_BASE_URL + 'explosion_large.mp3';
+                this.soundSources['alert'] = ASSET_BASE_URL + 'alert_new_wave.mp3';
+                this.soundSources['click'] = ASSET_BASE_URL + 'ui_click.mp3';
+            },
+
+            play: function(soundName) {
+                if (ASSET_BASE_URL.includes('YOUR-USERNAME')) return;
+
+                var audio = this.audioPool.find(function(a) { return a.isReady; });
+                if (audio) {
+                    audio.isReady = false;
+                    audio.src = this.soundSources[soundName];
+                    audio.play().catch(function(e) {
+                        audio.isReady = true;
+                    });
+                }
+            }
+        };
+        AudioManager.init();
+        // --- END Audio Manager ---
+
+
+        // --- NEW: v14.0 Video Manager (ES5 COMPATIBLE) ---
+        var videoCommsWindow = document.getElementById('video-comms-window');
+        var videoPlayer = document.getElementById('video-player');
+
+        var VideoManager = {
+            videoSources: {},
+            
+            init: function() {
+                this.videoSources['new_wave'] = ASSET_BASE_URL + 'new_wave.mp4';
+                this.videoSources['ace_spawn'] = ASSET_BASE_URL + 'ace_spawn.mp4';
+                this.videoSources['carrier_hit'] = ASSET_BASE_URL + 'carrier_hit.mp4';
+
+                videoPlayer.onended = function() {
+                    videoCommsWindow.style.display = 'none';
+                };
+            },
+
+            play: function(videoName) {
+                if (ASSET_BASE_URL.includes('YOUR-USERNAME') || !videoPlayer || !videoCommsWindow) {
+                    return;
+                }
+                
+                var src = this.videoSources[videoName];
+                if (src) {
+                    videoCommsWindow.style.display = 'block';
+                    videoPlayer.src = src;
+                    videoPlayer.play().catch(function(e) {
+                        videoCommsWindow.style.display = 'none';
+                    });
+                }
+            }
+        };
+        VideoManager.init();
+        // --- END Video Manager ---
+
+
+        // --- Blip class (ES5 COMPATIBLE) ---
+        function Blip(angle, distance, isTarget, shipType) {
+            shipType = shipType || null; // Fix for default parameter
+            
+            this.angle = angle; 
+            this.distance = distance; 
+            this.intensity = 0; 
+            this.isTarget = isTarget;
+            this.identified = false;
+            
+            this.domain = 'surface';
+            this.isDetected = { radar: true };
+            this.depth = 0;
+            
+            if (isTarget) {
+                this.id = enemyIdCounter++;
+                this.displayName = 'E' + this.id;
+                this.shipType = 'Enemy';
+
+                var baseSpeed = (Math.random() * 0.2 + 0.1) * 0.36125;
+                var variation = (Math.random() * 0.4) - 0.2;
+                this.speed = baseSpeed * (1 + variation) * enemySpeedMultiplier;
+                
+                this.state = 'HUNTING';
+                this.missilesLeft = enemyMissileCount;
+                this.currentTargetBlip = null; 
+                this.isFiring = false; 
+                this.hits = 0;
+                this.maxHits = 2;
+                this.flaresLeft = 3;
+                this.isDeployingFlares = false;
+
+                this.missilesFiredCount = 0;
+                this.targetsHitCount = 0;
+                this.targetsDestroyedCount = 0;
+                this.lifetimeKills = 0;
+                this.sitRep = 'SEARCHING'; 
+
+                if (gameConfig && gameConfig.aiPersonalities) {
+                    var keys = Object.keys(gameConfig.aiPersonalities);
+                    if (keys.length > 0) {
+                        var randomKey = keys[Math.floor(Math.random() * keys.length)];
+                        this.personality = gameConfig.aiPersonalities[randomKey];
+                    }
+                }
+                if (!this.personality) {
+                    this.personality = {
+                        personalityid: 'default',
+                        targetpriority: 'nearest',
+                        evasionprofile: 'standard',
+                        engagementrange: 0.3,
+                        minengagementscore: 1
+                    };
+                }
+                
+                this.squadName = null;
+                this.role = 'default';
+                this.leader = null;
+                this.evasionState = 'none';
+                this.evasionTimer = 0;
+
+            } else {
+                // --- FRIENDLY SHIP ---
+                this.id = shipIdCounter++;
+                this.displayName = 'S' + this.id;
+                this.speed = (Math.random() * 0.05) * 0.5;
+                this.hits = 0;
+                this.shipType = shipType; 
+                this.startDistance = distance;
+                
+                this.targetCourse = angle;
+                this.targetDistance = distance;
+                
+                var stats = gameConfig && gameConfig.shipStats ? gameConfig.shipStats[shipType.toLowerCase()] : null;
+                if (!stats) {
+                    var fallbackStats = {
+                        destroyer: { maxhits: 2, missileammo: 10, reloadtime: 2500 },
+                        cruiser: { maxhits: 3, missileammo: 10, reloadtime: 3000 },
+                        aircraftcarrier: { maxhits: 4, missileammo: 0, reloadtime: 0 }
+                    };
+                    stats = fallbackStats[shipType.toLowerCase()] || { maxhits: 3, missileammo: 0, reloadtime: 0 };
+                }
+
+                this.maxHits = parseInt(stats.maxhits) || 3;
+                this.defensiveMissilesLeft = parseInt(stats.missileammo) || 0;
+                this.reloadTime = parseInt(stats.reloadtime) || 3000;
+                
+                this.isFiringDefensiveMissile = false;
+                this.defensiveTargetBlip = null;
+            }
+            this.course = Math.random() * 360;
+            this.timeUntilCourseChange = Math.floor(Math.random() * 100) + 50; 
+        }
+            
+        Blip.prototype.move = function() {
+            if (this.speed === 0) return;
+
+            if (this.evasionTimer > 0) {
+                this.evasionTimer--;
+                if (this.evasionState === 'jink') {
+                    if (this.evasionTimer % 20 === 0) {
+                        var turnAmount = (Math.random() < 0.5) ? 45 : -45;
+                        this.course = (this.course + turnAmount + 360) % 360;
+                    }
+                }
+            } else if (this.evasionState !== 'none') {
+                this.evasionState = 'none';
+                var baseSpeed = (Math.random() * 0.2 + 0.1) * 0.36125;
+                var variation = (Math.random() * 0.4) - 0.2;
+                this.speed = baseSpeed * (1 + variation) * enemySpeedMultiplier;
+            }
+
+            if (this.isTarget) {
+                // --- ENEMY AI ---
+                if (this.evasionTimer <= 0) {
+                    this.checkForIncomingMissiles();
+                }
+
+                if (this.role === 'wingman' && this.leader && blips.includes(this.leader)) {
+                    this.followLeader();
+                    this.findTarget();
+                }
+                else if (this.evasionTimer > 0) {
+                    this.sitRep = 'EVADING!';
+                }
+                else if (this.state === 'HUNTING') {
+                    this.findTarget();
+                    
+                    if (this.sitRep !== 'UNDER FIRE') {
+                        this.sitRep = this.currentTargetBlip ? 'Target Acquired' : 'SEARCHING';
+                    }
+
+                    if (this.currentTargetBlip) {
+                        this.steerTowardsTarget();
+                        if (!this.isFiring) {
+                            this.fireMissile();
+                        }
+                    } else {
+                        this.loiter();
+                    }
+                } else if (this.state === 'ESCAPING') {
+                    if (this.sitRep !== 'UNDER FIRE') {
+                        this.sitRep = 'RETURN TO BASE';
+                    }
+                }
+
+            } else {
+                // --- FRIENDLY SHIP AI ---
+                if (this.shipType === 'Aircraft Carrier') {
+                    this.speed = 0;
+                    return;
+                } else {
+                    this.holdStation();
+                }
+
+                if (this.defensiveMissilesLeft > 0 && !this.isFiringDefensiveMissile) {
+                    if (!this.defensiveTargetBlip || !blips.includes(this.defensiveTargetBlip)) {
+                        this.findEnemyToTarget();
+                    }
+
+                    if (this.defensiveTargetBlip) {
+                        var dist = this.getDistanceToBlip(this.defensiveTargetBlip);
+                        if (dist > radius * 0.9) {
+                            this.defensiveTargetBlip = null;
+                        }
+                    }
+                }
+            }
+
+            // --- Shared Movement Physics ---
+            var coords = this.getCoords();
+            var currentX = coords[0];
+            var currentY = coords[1];
+            var radCourse = this.course * (Math.PI / 180);
+            var vx = this.speed * Math.cos(radCourse);
+            var vy = this.speed * Math.sin(radCourse);
+            var nextX = currentX + vx;
+            var nextY = currentY + vy;
+            
+            this.distance = Math.sqrt(Math.pow(nextX - center.x, 2) + Math.pow(nextY - center.y, 2)) / radius;
+            this.angle = (Math.atan2(nextY - center.y, nextX - center.x) * 180 / Math.PI + 360) % 360;
+
+            // --- Enemy Turning Logic ---
+            if (this.isTarget && this.state === 'HUNTING' && this.evasionTimer <= 0) {
+                this.timeUntilCourseChange--;
+                if (this.timeUntilCourseChange <= 0) {
+                    var turnAmount = (Math.random() * 60) - 30;
+                    this.course = (this.course + turnAmount + 360) % 360;
+                    this.timeUntilCourseChange = Math.floor(Math.random() * 100) + 50;
+                }
+            }
+            
+            // --- Boundary Turning Logic ---
+            if (this.distance > 0.95) {
+                if (this.isTarget && this.state === 'ESCAPING') {
+                    // Let it fly off
+                } else {
+                    this.distance = 0.95;
+                    var turnDirection = Math.random() < 0.5 ? 90 : -90;
+                    this.course = (this.course + turnDirection + Math.random() * 30 - 15 + 360) % 360;
+                }
+            }
+        };
+        
+        Blip.prototype.followLeader = function() {
+            var myCoords = this.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+            var leaderCoords = this.leader.getCoords();
+            var leaderX = leaderCoords[0];
+            var leaderY = leaderCoords[1];
+            
+            var targetX = leaderX + 50; 
+            var targetY = leaderY;
+            
+            var distToStation = Math.sqrt(Math.pow(myX - targetX, 2) + Math.pow(myY - targetY, 2));
+            
+            if (distToStation < 20) {
+                this.speed = this.leader.speed * 0.8;
+                this.course = this.steer(this.leader.course, 1.0);
+            } else {
+                var targetAngle = (Math.atan2(targetY - myY, targetX - myX) * 180 / Math.PI + 360) % 360;
+                this.course = this.steer(targetAngle, 3.0);
+                this.speed = this.leader.speed * 1.1;
+            }
+        };
+
+        Blip.prototype.findLeaderAttacker = function() {
+            for (var i = 0; i < friendlyFleet.length; i++) {
+                var ship = friendlyFleet[i];
+                if (ship.defensiveTargetBlip === this.leader) {
+                    return ship;
+                }
+            }
+            return null;
+        };
+
+        Blip.prototype.loiter = function() {
+            var targetAngle = (this.course + 0.5) % 360;
+            this.course = this.steer(targetAngle, 0.5);
+            
+            if (this.distance < 0.9) {
+                this.speed = 0.05 * enemySpeedMultiplier;
+            } else {
+                this.speed = 0.02 * enemySpeedMultiplier;
+            }
+        };
+        
+        Blip.prototype.holdStation = function() {
+            var myCoords = this.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+            
+            var radTarget = this.targetCourse * (Math.PI / 180);
+            var targetX = center.x + Math.cos(radTarget) * this.targetDistance * radius;
+            var targetY = center.y + Math.sin(radTarget) * this.targetDistance * radius;
+            
+            var distToStation = Math.sqrt(Math.pow(myX - targetX, 2) + Math.pow(myY - targetY, 2));
+            
+            if (distToStation < 5) {
+                this.speed = 0.005;
+            } else {
+                var targetAngle = (Math.atan2(targetY - myY, targetX - myX) * 180 / Math.PI + 360) % 360;
+                this.course = this.steer(targetAngle, 1.5);
+                this.speed = 0.01;
+            }
+        };
+        
+        Blip.prototype.steer = function(targetAngle, turnRate) {
+            var angleDiff = targetAngle - this.course;
+            if (angleDiff > 180) angleDiff -= 360;
+            if (angleDiff < -180) angleDiff += 360;
+
+            if (angleDiff > turnRate) {
+                return (this.course + turnRate) % 360;
+            } else if (angleDiff < -turnRate) {
+                return (this.course - turnRate + 360) % 360;
+            } else {
+                return targetAngle;
+            }
+        };
+
+        Blip.prototype.draw = function() {
+            if (!this.isDetected.radar) {
+                return;
+            }
+            
+            var coords = this.getCoords();
+            var x = coords[0];
+            var y = coords[1];
+
+            if (this.isTarget && this.identified) {
+                ctx.save();
+                ctx.strokeStyle = 'rgba(255, 65, 65, 1.0)';
+                ctx.lineWidth = 2;
+                ctx.shadowColor = 'rgba(255, 65, 65, 1.0)';
+                ctx.shadowBlur = 10;
+                ctx.strokeRect(x - lockSquareSize / 2, y - lockSquareSize / 2, lockSquareSize, lockSquareSize);
+                ctx.restore();
+            }
+
+            var alpha = 1.0; 
+
+            if (this.isTarget) {
+                if (this.hits > 0) {
+                    ctx.fillStyle = 'rgba(255, 255, 0, ' + alpha + ')';
+                    ctx.shadowColor = 'rgba(255, 255, 0, ' + alpha + ')';
+                } else if (this.identified) {
+                    ctx.fillStyle = 'rgba(255, 65, 65, ' + alpha + ')';
+                    ctx.shadowColor = 'rgba(255, 65, 65, ' + alpha + ')';
+                } else {
+                    ctx.fillStyle = 'rgba(0, 255, 65, ' + alpha + ')';
+                    ctx.shadowColor = 'rgba(0, 255, 65, ' + alpha + ')';
+                }
+            } else {
+                if (this.shipType === 'Aircraft Carrier') {
+                    if (this.hits === 0) ctx.fillStyle = 'rgba(255, 255, 255, ' + alpha + ')';
+                    else if (this.hits === 1) ctx.fillStyle = 'rgba(255, 255, 0, ' + alpha + ')';
+                    else ctx.fillStyle = 'rgba(255, 150, 0, ' + alpha + ')';
+                } else {
+                    if (this.hits === 0) ctx.fillStyle = 'rgba(0, 180, 255, ' + alpha + ')';
+                    else if (this.hits === 1) ctx.fillStyle = 'rgba(255, 255, 0, ' + alpha + ')';
+                    else ctx.fillStyle = 'rgba(255, 150, 0, ' + alpha + ')';
+                }
+                ctx.shadowColor = ctx.fillStyle;
+            }
+            ctx.shadowBlur = 10;
+
+            if (this.isTarget) {
+                var size = blipSize + 3;
+                ctx.save();
+                ctx.translate(x, y);
+                ctx.rotate((this.course + 90) * Math.PI / 180); 
+                ctx.beginPath();
+                ctx.moveTo(0, -size * 0.75);
+                ctx.lineTo(size * 0.7, size * 0.5);
+                ctx.lineTo(-size * 0.7, size * 0.5);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+
+            } else if (this.domain === 'air') {
+                var size = blipSize + 3;
+                ctx.save();
+                ctx.translate(x, y);
+                ctx.rotate((this.course + 90) * Math.PI / 180); 
+                ctx.beginPath();
+                ctx.moveTo(0, -size * 0.75);
+                ctx.lineTo(size * 0.7, size * 0.75);
+                ctx.lineTo(0, size * 0.25);
+                ctx.lineTo(-size * 0.7, size * 0.75);
+                ctx.closePath();
+                ctx.fill();
+                ctx.restore();
+
+            } else if (this.shipType === 'Aircraft Carrier') {
+                var size = blipSize + 2;
+                ctx.strokeStyle = ctx.fillStyle;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(x - size, y);
+                ctx.lineTo(x + size, y);
+                ctx.moveTo(x, y - size);
+                ctx.lineTo(x, y + size);
+                ctx.stroke();
+
+            } else {
+                var size = blipSize + 1;
+                ctx.fillRect(x - size, y - size, size * 2, size * 2);
+            }
+            
+            if (this.isTarget && this.currentTargetBlip && blips.includes(this.currentTargetBlip)) {
+                this.drawTrackingLine(this.currentTargetBlip, 'rgba(255, 65, 65, 0.5)');
+            }
+
+            ctx.font = '12px Orbitron';
+            ctx.fillStyle = ctx.shadowColor;
+            ctx.shadowBlur = 0;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(this.displayName, x + blipSize + 3, y - blipSize - 3);
+        };
+        
+        Blip.prototype.drawTrackingLine = function(targetBlip, color) {
+            var coords = this.getCoords();
+            var x = coords[0];
+            var y = coords[1];
+            var targetCoords = targetBlip.getCoords();
+            var targetX = targetCoords[0];
+            var targetY = targetCoords[1];
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.setLineDash([2, 4]);
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(targetX, targetY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        };
+
+        Blip.prototype.getCoords = function() {
+            var rad = this.angle * (Math.PI / 180);
+            var x = center.x + Math.cos(rad) * this.distance * radius;
+            var y = center.y + Math.sin(rad) * this.distance * radius;
+            return [x, y];
+        };
+
+        Blip.prototype.getDistanceToBlip = function(otherBlip) {
+            var coords1 = this.getCoords();
+            var x1 = coords1[0];
+            var y1 = coords1[1];
+            var coords2 = otherBlip.getCoords();
+            var x2 = coords2[0];
+            var y2 = coords2[1];
+            return Math.sqrt(Math.pow(x1 - x2, 2) + Math.pow(y1 - y2, 2));
+        };
+
+        Blip.prototype.findTarget = function() {
+            var self = this; // For use in map/filter
+            if (this.role === 'wingman' && this.leader && blips.includes(this.leader)) {
+                var attacker = this.findLeaderAttacker();
+                if (attacker) {
+                    this.currentTargetBlip = attacker;
+                    return;
+                }
+            }
+            
+            var myCoords = this.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+            
+            var allTargets = friendlyFleet.filter(function(ship) {
+                return blips.includes(ship) && ship.hits < ship.maxHits;
+            });
+            if (allTargets.length === 0) {
+                this.currentTargetBlip = null;
+                return;
+            }
+
+            var priority = this.personality.targetpriority || 'nearest';
+            var potentialTargets = [];
+            
+            switch (priority) {
+                case 'carrier':
+                    potentialTargets = allTargets.filter(function(ship) { return ship.shipType === 'Aircraft Carrier'; });
+                    break;
+                case 'damaged':
+                    potentialTargets = allTargets.filter(function(ship) { return ship.hits > 0; });
+                    break;
+                case 'weakest':
+                    potentialTargets = allTargets.filter(function(ship) { return ship.shipType === 'Destroyer'; });
+                    break;
+                case 'nearest':
+                default:
+                    potentialTargets = allTargets;
+                    break;
+            }
+            
+            if (potentialTargets.length === 0) {
+                potentialTargets = allTargets;
+            }
+            
+            var scoredTargets = potentialTargets.map(function(ship) {
+                var score = 10;
+                
+                if (ship.hits > 0) {
+                    score += (ship.hits / ship.maxHits) * 20;
+                }
+                
+                if (ship.isFiringDefensiveMissile) {
+                    score += 25;
+                }
+                
+                if (ship.shipType === 'Aircraft Carrier') {
+                    score += 5;
+                } else if (ship.shipType === 'Destroyer') {
+                    score -= 5;
+                }
+                
+                var dist = self.getDistanceToBlip(ship);
+                score += (1 - (dist / radius)) * 15;
+                
+                return { ship: ship, score: score };
+            });
+
+            if (scoredTargets.length === 0) {
+                 this.currentTargetBlip = null;
+                 return;
+            }
+
+            scoredTargets.sort(function(a, b) { return b.score - a.score; });
+            
+            var bestTarget = scoredTargets[0];
+            var minScore = this.personality.minengagementscore || 1;
+
+            if (bestTarget.score >= minScore) {
+                this.currentTargetBlip = bestTarget.ship;
+            } else {
+                this.currentTargetBlip = null;
+            }
+        };
+
+        Blip.prototype.steerTowardsTarget = function() {
+            if (!this.currentTargetBlip) return;
+            var myCoords = this.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+            var targetCoords = this.currentTargetBlip.getCoords();
+            var targetX = targetCoords[0];
+            var targetY = targetCoords[1];
+            var targetAngle = (Math.atan2(targetY - myY, targetX - myX) * 180 / Math.PI + 360) % 360;
+            this.course = this.steer(targetAngle, 2.0);
+        };
+        
+        Blip.prototype.fireMissile = function() {
+            if (!this.currentTargetBlip || this.isFiring) return;
+            
+            var dist = this.getDistanceToBlip(this.currentTargetBlip);
+            var engagementRange = this.personality.engagementrange || 0.3;
+            
+            if (dist < radius * engagementRange) { 
+                this.missilesLeft--;
+                this.missilesFiredCount++;
+                
+                var myCoords = this.getCoords();
+                var myX = myCoords[0];
+                var myY = myCoords[1];
+                var missile = new EnemyMissile(myX, myY, this.currentTargetBlip, this);
+                projectiles.push(missile);
+                this.isFiring = true;
+                
+                if (this.missilesLeft <= 0) {
+                    this.state = 'ESCAPING';
+                    this.currentTargetBlip = null;
+                    this.course = this.angle;
+                }
+            }
+        };
+
+        Blip.prototype.checkForIncomingMissiles = function() {
+            if (this.state === 'ESCAPING') return;
+            var myCoords = this.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+            var isUnderFire = false;
+
+            for (var i = 0; i < projectiles.length; i++) {
+                var missile = projectiles[i];
+                if ((missile.type === 'player' || missile.type === 'defensive') && missile.target === this) {
+                    var dist = Math.sqrt(Math.pow(missile.x - myX, 2) + Math.pow(missile.y - myY, 2)); // Fixed bug here
+                    
+                    if (dist < playerSeekerActivationRadius + 20) {
+                        isUnderFire = true;
+                        if (dist < playerSeekerActivationRadius) {
+                            this.executeEvasion(myX, myY);
+                            break;
+                        }
+                    }
+                }
+            }
+            if (isUnderFire) {
+                this.sitRep = 'UNDER FIRE';
+            }
+        };
+
+        Blip.prototype.executeEvasion = function(x, y) {
+            if (this.flaresLeft <= 0 || this.evasionTimer > 0) return;
+            
+            this.flaresLeft--;
+            projectiles.push(new Flare(x, y));
+
+            var profile = this.personality.evasionprofile || 'standard';
+            this.sitRep = 'EVADING!';
+
+            switch (profile) {
+                case 'jink':
+                    this.evasionState = 'jink';
+                    this.evasionTimer = 90;
+                    break;
+                case 'hardbrake':
+                    this.evasionState = 'hardbrake';
+                    this.evasionTimer = 120;
+                    this.speed *= 0.1;
+                    break;
+                case 'standard':
+                default:
+                    this.evasionState = 'standard';
+                    this.evasionTimer = 60;
+                    var turnAmount = (Math.random() < 0.5) ? 90 : -90;
+                    this.course = (this.course + turnAmount + 360) % 360;
+                    break;
+            }
+        };
+
+        Blip.prototype.findEnemyToTarget = function() {
+            var closestDist = Infinity;
+            var closestTarget = null;
+            var myCoords = this.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+
+            for (var i = 0; i < blips.length; i++) {
+                var blip = blips[i];
+                if (blip.isTarget) {
+                    var targetCoords = blip.getCoords();
+                    var targetX = targetCoords[0];
+                    var targetY = targetCoords[1];
+                    var dist = Math.sqrt(Math.pow(myX - targetX, 2) + Math.pow(myY - targetY, 2));
+                    if (dist < radius * 0.9 && dist < closestDist) {
+                        closestDist = dist;
+                        closestTarget = blip;
+                    }
+                }
+            }
+            this.defensiveTargetBlip = closestTarget;
+        };
+        // --- END Blip Class ---
+
+
+        // --- FighterJet Class (ES5 COMPATIBLE) ---
+        function FighterJet(angle, distance, jetId, assignedSector) {
+            Blip.call(this, angle, distance, false, 'Fighter'); // Call super()
+            
+            this.domain = 'air';
+            this.jetId = jetId;
+            var jetData = fighterWing.find(function(j) { return j.id === jetId; });
+            
+            this.fuel = jetData.fuel;
+            this.ammo = jetData.ammo;
+            this.jetState = 'patrolling';
+            this.radarRange = (fighterStats.radar_range_percent || 0.25) * radius;
+            
+            var targetCoords = getCoordsFromSector(assignedSector);
+            this.targetCourse = targetCoords.angle;
+            this.targetDistance = targetCoords.distance;
+            
+            this.displayName = 'JET ' + this.jetId;
+            this.speed = 0.2;
+            this.course = this.targetCourse;
+            this.hits = 0;
+            this.maxHits = 1;
+            this.color = '#00FFFF';
+        }
+        
+        // Setup Inheritance
+        FighterJet.prototype = Object.create(Blip.prototype);
+        FighterJet.prototype.constructor = FighterJet;
+
+        FighterJet.prototype.draw = function() {
+            if (!this.isDetected.radar) return;
+            
+            var coords = this.getCoords();
+            var x = coords[0];
+            var y = coords[1];
+            var alpha = 1.0;
+            
+            if (this.jetState === 'engaging') {
+                ctx.fillStyle = 'rgba(255, 65, 65, ' + alpha + ')';
+            } else if (this.jetState === 'returning') {
+                ctx.fillStyle = 'rgba(255, 255, 0, ' + alpha + ')';
+            } else {
+                ctx.fillStyle = 'rgba(0, 255, 255, ' + alpha + ')';
+            }
+            ctx.shadowColor = ctx.fillStyle;
+            ctx.shadowBlur = 10;
+            
+            var size = blipSize + 3;
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate((this.course + 90) * Math.PI / 180); 
+            ctx.beginPath();
+            ctx.moveTo(0, -size * 0.75);
+            ctx.lineTo(size * 0.7, size * 0.75);
+            ctx.lineTo(0, size * 0.25);
+            ctx.lineTo(-size * 0.7, size * 0.75);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+            
+            if (this.jetState === 'engaging' && this.currentTargetBlip && blips.includes(this.currentTargetBlip)) {
+                this.drawTrackingLine(this.currentTargetBlip, 'rgba(255, 65, 65, 0.5)');
+            }
+
+            ctx.font = '12px Orbitron';
+            ctx.fillStyle = ctx.shadowColor;
+            ctx.shadowBlur = 0;
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(this.displayName, x + blipSize + 3, y - blipSize - 3);
+        };
+        
+        FighterJet.prototype.move = function() {
+            var self = this; // For find()
+            var jetData = fighterWing.find(function(j) { return j.id === self.jetId; });
+            if (!jetData) {
+                blips.splice(blips.indexOf(this), 1);
+                return;
+            }
+            jetData.fuel = this.fuel;
+            jetData.ammo = this.ammo;
+            jetData.jetState = this.jetState;
+
+            if (this.jetState !== 'returning' && (this.fuel <= 0 || this.ammo <= 0)) {
+                this.jetState = 'returning';
+                jetData.jetState = 'returning';
+            }
+            
+            switch (this.jetState) {
+                case 'patrolling':
+                    this.patrol();
+                    this.findTarget();
+                    break;
+                case 'engaging':
+                    this.engage();
+                    break;
+                case 'returning':
+                    this.returnToCarrier();
+                    break;
+            }
+            
+            Blip.prototype.move.call(this); // Call super.move()
+        };
+        
+        FighterJet.prototype.patrol = function() {
+            this.speed = 0.02;
+            this.targetCourse = (this.targetCourse + 0.5) % 360;
+            this.holdStation();
+        };
+        
+        FighterJet.prototype.engage = function() {
+            if (!this.currentTargetBlip || !blips.includes(this.currentTargetBlip) || this.currentTargetBlip.hits >= this.currentTargetBlip.maxHits) {
+                this.jetState = 'patrolling';
+                this.currentTargetBlip = null;
+                return;
+            }
+            
+            this.speed = 0.1;
+            this.steerTowardsTarget();
+            this.fireMissile();
+        };
+        
+        FighterJet.prototype.returnToCarrier = function() {
+            this.speed = 0.15;
+            this.targetCourse = this.angle;
+            this.targetDistance = 0;
+            
+            this.holdStation();
+            
+            if (this.distance < 0.05) {
+                this.land();
+            }
+        };
+        
+        FighterJet.prototype.land = function() {
+            var self = this; // For find()
+            var jetData = fighterWing.find(function(j) { return j.id === self.jetId; });
+            if (jetData) {
+                jetData.state = 'refueling';
+                jetData.refuelTimer = fighterStats.refueltime || 60;
+                jetData.blip = null;
+            }
+            var blipIndex = blips.indexOf(this);
+            if (blipIndex > -1) {
+                blips.splice(blipIndex, 1);
+            }
+        };
+        
+        FighterJet.prototype.findTarget = function() {
+            var myCoords = this.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+            var closestDist = this.radarRange;
+            var closestTarget = null;
+
+            for (var i = 0; i < blips.length; i++) {
+                var blip = blips[i];
+                if (blip.isTarget) {
+                    var targetCoords = blip.getCoords();
+                    var targetX = targetCoords[0];
+                    var targetY = targetCoords[1];
+                    var dist = Math.sqrt(Math.pow(myX - targetX, 2) + Math.pow(myY - targetY, 2));
+                    if (dist < closestDist) {
+                        closestDist = dist;
+                        closestTarget = blip;
+                    }
+                }
+            }
+            
+            if (closestTarget) {
+                this.currentTargetBlip = closestTarget;
+                this.jetState = 'engaging';
+            } else {
+                this.currentTargetBlip = null;
+                this.jetState = 'patrolling';
+            }
+        };
+        
+        FighterJet.prototype.fireMissile = function() {
+            var self = this; // For setTimeout
+            if (!this.currentTargetBlip || this.isFiring || this.ammo <= 0) return;
+            
+            var dist = this.getDistanceToBlip(this.currentTargetBlip);
+
+            if (dist < this.radarRange * 0.8) {
+                this.ammo--;
+                
+                var myCoords = this.getCoords();
+                var myX = myCoords[0];
+                var myY = myCoords[1];
+                var missile = new DefensiveMissile(myX, myY, this.currentTargetBlip, this);
+                projectiles.push(missile);
+                this.isFiring = true;
+                
+                setTimeout(function() {
+                    self.isFiring = false;
+                }, 1000);
+            }
+        };
+        // --- END FighterJet Class ---
+
+
+        // --- Base Projectile Class (ES5 COMPATIBLE) ---
+        function Projectile(x, y, target, owner, type, speed, size) {
+            this.x = x;
+            this.y = y;
+            this.target = target;
+            this.owner = owner;
+            this.type = type;
+            this.speed = speed;
+            this.size = size;
+
+            var targetX, targetY;
+            if (target) {
+                var targetCoords = target.getCoords();
+                targetX = targetCoords[0];
+                targetY = targetCoords[1];
+            } else {
+                targetX = x + 100;
+                targetY = y;
+            }
+            this.course = (Math.atan2(targetY - this.y, targetX - this.x) * 180 / Math.PI + 360) % 360;
+        }
+
+        Projectile.prototype.move = function() {
+            var radCourse = this.course * (Math.PI / 180);
+            this.x += this.speed * Math.cos(radCourse);
+            this.y += this.speed * Math.sin(radCourse);
+        };
+        
+        Projectile.prototype.draw = function(color) {
+            ctx.fillStyle = color;
+            ctx.shadowColor = color;
+            ctx.shadowBlur = 10;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        };
+
+        Projectile.prototype.isOffScreen = function() {
+            var distFromCenter = Math.sqrt(Math.pow(this.x - center.x, 2) + Math.pow(this.y - center.y, 2));
+            return distFromCenter > radius * 1.1;
+        };
+        
+        Projectile.prototype.seek = function(seekerRadius, turnRate) {
+            var targetX, targetY, distToTarget;
+            var flareTarget = null;
+            var closestFlareDist = Infinity;
+            
+            if (this.target && blips.includes(this.target)) {
+                var targetCoords = this.target.getCoords();
+                targetX = targetCoords[0];
+                targetY = targetCoords[1];
+                distToTarget = Math.sqrt(Math.pow(this.x - targetX, 2) + Math.pow(this.y - targetY, 2));
+            } else {
+                this.target = null;
+                var radCourse = this.course * (Math.PI / 180);
+                targetX = this.x + Math.cos(radCourse) * 100;
+                targetY = this.y + Math.sin(radCourse) * 100;
+                distToTarget = 100;
+            }
+
+            if (distToTarget < seekerRadius) {
+                for (var i = 0; i < projectiles.length; i++) {
+                    var p = projectiles[i];
+                    if (p.type === 'flare') {
+                        var dist = Math.sqrt(Math.pow(this.x - p.x, 2) + Math.pow(this.y - p.y, 2));
+                        if (dist < closestFlareDist && dist < seekerRadius) {
+                            closestFlareDist = dist;
+                            flareTarget = p;
+                        }
+                    }
+                }
+                
+                if (flareTarget && closestFlareDist < distToTarget) {
+                    targetX = flareTarget.x;
+                    targetY = flareTarget.y;
+                    this.target = null;
+                }
+
+                var targetAngle = (Math.atan2(targetY - this.y, targetX - this.x) * 180 / Math.PI + 360) % 360;
+                
+                var angleDiff = targetAngle - this.course;
+                if (angleDiff > 180) angleDiff -= 360;
+                if (angleDiff < -180) angleDiff += 360;
+
+                if (angleDiff > turnRate) this.course = (this.course + turnRate) % 360;
+                else if (angleDiff < -turnRate) this.course = (this.course - turnRate + 360) % 360;
+                else this.course = targetAngle;
+            }
+        };
+        // --- END Projectile Class ---
+
+        
+        // --- EnemyMissile Class (ES5 COMPATIBLE) ---
+        function EnemyMissile(startX, startY, targetBlip, ownerBlip) {
+            Projectile.call(this, startX, startY, targetBlip, ownerBlip, 'enemy', 0.28028, 3);
+        }
+        EnemyMissile.prototype = Object.create(Projectile.prototype);
+        EnemyMissile.prototype.constructor = EnemyMissile;
+        
+        EnemyMissile.prototype.move = function() {
+            this.seek(enemySeekerActivationRadius, 4.0);
+            Projectile.prototype.move.call(this); // super.move()
+        };
+        EnemyMissile.prototype.draw = function() {
+            Projectile.prototype.draw.call(this, '#ff9900'); // super.draw()
+        };
+        // --- END EnemyMissile Class ---
+
+        
+        // --- DefensiveMissile Class (ES5 COMPATIBLE) ---
+        function DefensiveMissile(startX, startY, targetBlip, ownerBlip) {
+            var baseSpeed = 0.0834;
+            var finalSpeed = baseSpeed * playerMissileSpeedMultiplier;
+            Projectile.call(this, startX, startY, targetBlip, ownerBlip, 'player', finalSpeed, 2);
+            this.life = 2100;
+        }
+        DefensiveMissile.prototype = Object.create(Projectile.prototype);
+        DefensiveMissile.prototype.constructor = DefensiveMissile;
+
+        DefensiveMissile.prototype.move = function() {
+            this.life--;
+            this.seek(defensiveSeekerActivationRadius, 6.0);
+            Projectile.prototype.move.call(this); // super.move()
+        };
+        DefensiveMissile.prototype.draw = function() {
+            Projectile.prototype.draw.call(this, '#00ffff'); // super.draw()
+        };
+        DefensiveMissile.prototype.isOffScreen = function() {
+            var distFromCenter = Math.sqrt(Math.pow(this.x - center.x, 2) + Math.pow(this.y - center.y, 2));
+            var maxRange = radius * 0.9;
+            return distFromCenter > maxRange || this.life <= 0;
+        };
+        // --- END DefensiveMissile Class ---
+
+
+        // --- Flare Class (ES5 COMPATIBLE) ---
+        function Flare(x, y) {
+            Projectile.call(this, x, y, null, null, 'flare', 0, 5);
+            this.life = 100;
+            this.intensity = 1.0;
+        }
+        Flare.prototype = Object.create(Projectile.prototype);
+        Flare.prototype.constructor = Flare;
+
+        Flare.prototype.move = function() {
+            this.life--;
+            if (this.life < 50) {
+                this.intensity = this.life / 50;
+            }
+        };
+        Flare.prototype.draw = function() {
+            ctx.fillStyle = 'rgba(255, 255, 100, ' + (this.intensity * 0.8) + ')';
+            ctx.shadowColor = 'rgba(255, 255, 100, ' + this.intensity + ')';
+            ctx.shadowBlur = 20;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        };
+        Flare.prototype.isOffScreen = function() {
+            return this.life <= 0;
+        };
+        // --- END Flare Class ---
+
+
+        // --- Drawing Functions ---
+        function drawGrid() {
+            ctx.strokeStyle = radarColorDim;
+            ctx.lineWidth = 1;
+            ctx.shadowBlur = 0;
+            for (var i = 1; i <= 4; i++) {
+                ctx.beginPath();
+                ctx.arc(center.x, center.y, (radius / 4) * i, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+            
+            ctx.beginPath();
+            ctx.moveTo(center.x, center.y - radius);
+            ctx.lineTo(center.x, center.y + radius);
+            ctx.moveTo(center.x - radius, center.y);
+            ctx.lineTo(center.x + radius, center.y);
+            var angle45 = Math.PI / 4;
+            ctx.moveTo(center.x - radius * Math.cos(angle45), center.y - radius * Math.sin(angle45));
+            ctx.lineTo(center.x + radius * Math.cos(angle45), center.y + radius * Math.sin(angle45));
+            ctx.moveTo(center.x - radius * Math.cos(angle45), center.y + radius * Math.sin(angle45));
+            ctx.lineTo(center.x + radius * Math.cos(angle45), center.y - radius * Math.sin(angle45));
+            ctx.stroke();
+
+            ctx.fillStyle = radarColor;
+            ctx.font = "clamp(12px, 2vw, 16px) 'Orbitron'";
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.shadowColor = radarColor;
+            ctx.shadowBlur = 5;
+            
+            var ringLabels = ['1', '2', '3', '4'];
+            for (var i = 0; i < ringLabels.length; i++) {
+                var coords = getCoordsFromSector('B' + (i + 1));
+                ctx.fillText(ringLabels[i], coords.x, coords.y);
+            }
+
+            var sectorLabels = {
+                0: 'C (E)', 45: 'B (NE)', 90: 'A (N)', 135: 'H (NW)',
+                180: 'G (W)', 225: 'F (SW)', 270: 'E (S)', 315: 'D (SE)'
+            };
+            var textRadius = radius + 25;
+            for (var i = 0; i < 8; i++) {
+                var angleDeg = i * 45;
+                var angleRad = angleDeg * (Math.PI / 180);
+                var x = center.x + Math.cos(angleRad) * textRadius;
+                var y = center.y + Math.sin(angleRad) * textRadius;
+                ctx.fillText(sectorLabels[angleDeg], x, y);
+            }
+        }
+
+
+        // --- Main Animation Loop ---
+        function animate() {
+            if (!gameActive || isPaused) {
+                return;
+            }
+            
+            ctx.fillStyle = 'rgba(2, 26, 2, 0.1)'; 
+            ctx.shadowBlur = 0;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            drawGrid();
+
+            var enemyBlips = blips.filter(function(b) { return b.isTarget; });
+            if (enemyBlips.length === 0) {
+                for (var i = projectiles.length - 1; i >= 0; i--) {
+                    var p = projectiles[i];
+                    if (p.type === 'player') {
+                        if (blips.includes(p.owner)) {
+                            p.owner.isFiringDefensiveMissile = false;
+                            p.owner.defensiveTargetBlip = null;
+                        }
+                        projectiles.splice(i, 1);
+                    }
+                }
+            }
+
+            // Update blips
+            for (var i = blips.length - 1; i >= 0; i--) {
+                var blip = blips[i];
+                blip.move();
+                blip.draw();
+                
+                if (blip.distance > 1.0) {
+                    var wasTarget = blip.isTarget; 
+                    blips.splice(i, 1);
+                    
+                    if (wasTarget) {
+                        if (blip.state === 'ESCAPING') {
+                            setTimeout(function() { respawnExistingEnemy(blip); }, 3000);
+                        } else {
+                            handleTargetHit(blip, false);
+                        }
+                    } else {
+                        var fleetIndex = friendlyFleet.indexOf(blip);
+                        if (fleetIndex > -1) {
+                             friendlyFleet.splice(fleetIndex, 1);
+                        }
+                    }
+                }
+            }
+            
+            // Update projectiles
+            for (var i = projectiles.length - 1; i >= 0; i--) {
+                var missile = projectiles[i];
+                if (!missile) continue;
+                
+                missile.move();
+                missile.draw();
+
+                var hit = false;
+
+                if (missile.type === 'player') {
+                    if (!missile.target) {
+                        for (var p_idx = 0; p_idx < projectiles.length; p_idx++) {
+                            var p = projectiles[p_idx];
+                            if (p.type === 'flare') {
+                                var dist = Math.sqrt(Math.pow(missile.x - p.x, 2) + Math.pow(missile.y - p.y, 2));
+                                if (dist < missileHitRadius) {
+                                    projectiles.splice(i, 1);
+                                    hit = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (hit) {
+                    if (missile.type === 'player' && blips.includes(missile.owner)) {
+                        missile.owner.isFiringDefensiveMissile = false;
+                        missile.owner.defensiveTargetBlip = null;
+                    }
+                    continue;
+                }
+                
+                if (missile.type === 'player') {
+                    if (missile.target && blips.includes(missile.target)) {
+                        var targetCoords = missile.target.getCoords();
+                        var targetX = targetCoords[0];
+                        var targetY = targetCoords[1];
+                        var dist = Math.sqrt(Math.pow(missile.x - targetX, 2) + Math.pow(missile.y - targetY, 2));
+                        var hitRadius = defensiveMissileHitRadius;
+
+                        if (dist < hitRadius) {
+                            projectiles.splice(i, 1);
+                            hit = true;
+                            
+                            if (blips.includes(missile.owner)) {
+                                if (missile.owner.jetState) {
+                                    missile.owner.isFiring = false;
+                                } else {
+                                    missile.owner.isFiringDefensiveMissile = false;
+                                    missile.owner.defensiveTargetBlip = null;
+                                }
+                            }
+                            
+                            handleTargetHit(missile.target, true);
+                        }
+                    }
+                } else if (missile.type === 'enemy') {
+                    if (missile.target && blips.includes(missile.target)) {
+                        var targetCoords = missile.target.getCoords();
+                        var targetX = targetCoords[0];
+                        var targetY = targetCoords[1];
+                        var dist = Math.sqrt(Math.pow(missile.x - targetX, 2) + Math.pow(missile.y - targetY, 2));
+
+                        if (dist < enemyMissileHitRadius) {
+                            projectiles.splice(i, 1);
+                            hit = true;
+                            
+                            if (blips.includes(missile.owner)) {
+                                missile.owner.isFiring = false;
+                                missile.owner.targetsHitCount++;
+                            }
+                            
+                            if (missile.target) {
+                                missile.target.hits++;
+                                
+                                if (missile.target === carrierBlip) {
+                                    VideoManager.play('carrier_hit');
+                                }
+                                
+                                if (missile.target.hits >= missile.target.maxHits) {
+                                    AudioManager.play('explosion_large');
+                                }
+                                
+                                if (missile.target.domain === 'surface') {
+                                    updateNavigationPanel(); 
+                                }
+                                
+                                if (missile.target.hits >= missile.target.maxHits) {
+                                    var blipIndex = blips.indexOf(missile.target);
+                                    if (blipIndex > -1) blips.splice(blipIndex, 1);
+                                    if (blips.includes(missile.owner)) {
+                                        missile.owner.targetsDestroyedCount++;
+                                    }
+                                    if (missile.target.domain === 'surface') {
+                                        updateNavigationPanel();
+                                    }
+                                } else {
+                                    if (missile.owner) missile.owner.currentTargetBlip = null;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!hit && missile.isOffScreen()) {
+                    projectiles.splice(i, 1);
+                    if (missile.type === 'player' && blips.includes(missile.owner)) {
+                        if (missile.owner.jetState) {
+                            missile.owner.isFiring = false;
+                        } else {
+                            missile.owner.isFiringDefensiveMissile = false;
+                            missile.owner.defensiveTargetBlip = null;
+                        }
+                    } else if (missile.type === 'enemy' && blips.includes(missile.owner)) {
+                        missile.owner.isFiring = false;
+                    }
+                }
+            }
+            
+            updateWeaponsControlPanel();
+            updateNavigationPanel(); 
+            updateFlightWingPanel();
+            
+            fighterWingTimer++;
+            if (fighterWingTimer >= 60) {
+                fighterWingTimer = 0;
+                updateFighterWingTimers();
+            }
+            
+            if (gameActive && carrierBlip && !blips.includes(carrierBlip)) {
+                endGame(false);
+            }
+            
+            if (gameActive && enemiesLeftInWave <= 0) {
+                if (currentWave < totalWaves) {
+                    hostilesReadout.textContent = '0';
+                    waveReadout.textContent = '...';
+                    startNextWave();
+                } else {
+                    endGame(true);
+                }
+            }
+
+            if (gameActive) {
+                requestAnimationFrame(animate);
+            }
+        }
+
+        // --- Initialization & Game Logic ---
+        function resetRound() {
+            blips.length = 0; 
+            projectiles.length = 0;
+            shipIdCounter = 1;
+            enemyIdCounter = 1;
+            friendlyFleet.length = 0;
+            enemyIntelList.length = 0;
+            carrierBlip = null; 
+ 
+            var carrier = new Blip(0, 0, false, 'Aircraft Carrier');
+            blips.push(carrier);
+            friendlyFleet.push(carrier);
+            carrierBlip = carrier; 
+
+            var numShips = fleetComposition.length;
+            var angleStep = 360 / numShips;
+            var defensiveRadius = 0.25;
+
+            for (var i = 0; i < numShips; i++) {
+                var shipType = fleetComposition[i];
+                var angle = angleStep * i;
+                var friendly = new Blip(angle, defensiveRadius, false, shipType);
+                blips.push(friendly);
+                friendlyFleet.push(friendly);
+            }
+        }
+
+        function handleTargetHit(targetBlip, givePoints) {
+            if (givePoints) {
+                updateScore(200);
+                AudioManager.play('explosion_small');
+            }
+            
+            var blipIndex = blips.indexOf(targetBlip);
+            if (blipIndex > -1) {
+                blips.splice(blipIndex, 1);
+            }
+            
+            enemiesLeftInWave--;
+            if (enemiesLeftInWave < 0) enemiesLeftInWave = 0;
+            hostilesReadout.textContent = enemiesLeftInWave;
+        }
+        
+        function respawnExistingEnemy(blip) {
+            enemiesLeftInWave++;
+            hostilesReadout.textContent = enemiesLeftInWave;
+
+            blip.hits = 0;
+            blip.state = 'HUNTING';
+            blip.sitRep = 'SEARCHING';
+            blip.isFiring = false;
+            blip.currentTargetBlip = null;
+            blip.isDeployingFlares = false;
+            blip.angle = Math.random() * 360;
+            blip.distance = Math.random() * 0.05 + 0.9;
+            blip.course = Math.random() * 360;
+            blip.timeUntilCourseChange = Math.floor(Math.random() * 100) + 50; 
+            blips.push(blip);
+        }
+
+        function startGame() {
+            
+            if (!gameConfig) {
+                console.error("Game config not loaded!");
+                loadingStatus.textContent = "Error: Failed to load mission data. Please refresh.";
+                loadingStatus.style.color = "#ff4141";
+                return;
+            }
+            try {
+                var diffData = gameConfig.difficulty[currentDifficulty];
+                var fleetData = gameConfig.fleetComps[currentDifficulty];
+                
+                if (!gameConfig.shipStats) {
+                    console.warn("ShipStats config not found. Using fallbacks.");
+                }
+                
+                if (!gameConfig.aiPersonalities) {
+                    console.warn("AIPersonalities config not found. Using fallback.");
+                }
+
+                fighterStats = (gameConfig.fighterStats && gameConfig.fighterStats.carrier) ? gameConfig.fighterStats.carrier : {
+                    totaljets: 2,
+                    fuel: 300,
+                    ammo: 4,
+                    refueltime: 60,
+                    radar_range_percent: 0.25
+                };
+                
+                fighterWing = [];
+                var numJets = fighterStats.totaljets || 2; 
+                for (var i = 0; i < numJets; i++) {
+                    fighterWing.push({
+                        id: i + 1,
+                        state: 'ready',
+                        fuel: fighterStats.fuel,
+                        ammo: fighterStats.ammo,
+                        refuelTimer: 0,
+                        blip: null,
+                        assignedSector: "A1"
+                    });
+                }
+
+                waveConfig = (gameConfig.waves[currentDifficulty] && gameConfig.waves[currentDifficulty].waves) ? gameConfig.waves[currentDifficulty].waves : [];
+                squadronWaveConfig = (gameConfig.squadronWaves[currentDifficulty] && gameConfig.squadronWaves[currentDifficulty].waves) ? gameConfig.squadronWaves[currentDifficulty].waves : [];
+                
+                if ((!waveConfig || waveConfig.length === 0) && (!squadronWaveConfig || squadronWaveConfig.length === 0)) {
+                     throw new Error('Wave data for \'' + currentDifficulty + '\' not found. Check spreadsheet.');
+                }
+
+                totalWaves = squadronWaveConfig.length > 0 ? squadronWaveConfig.length : waveConfig.length;
+                
+                if (!diffData || !fleetData) {
+                    throw new Error('Config for difficulty \'' + currentDifficulty + '\' not found. Check spreadsheet.');
+                }
+
+                enemyMissileCount = parseInt(diffData.enemymissilecount) || 3;
+                enemySpeedMultiplier = parseFloat(diffData.enemyspeedmultiplier) || 1.0;
+                playerMissileSpeedMultiplier = parseFloat(diffData.playermissilespeed) || 1.0;
+                fleetComposition = fleetData.map(function(ship) { return ship.shiptype; });
+                
+                currentWave = 0;
+                enemiesLeftInWave = 0;
+            
+            } catch (error) {
+                console.error("Error parsing game config:", error);
+                loadingStatus.textContent = 'Error: ' + error.message;
+                loadingStatus.style.color = "#ff4141";
+                startModal.style.display = 'flex';
+                gameUiElements.forEach(function(el) { el.style.display = 'none'; });
+                return;
+            }
+
+            try {
+                var ambiance = document.getElementById('audio-ambiance');
+                if (!ASSET_BASE_URL.includes('YOUR-USERNAME')) {
+                    ambiance.src = ASSET_BASE_URL + 'ambiance.mp3';
+                    ambiance.volume = 0.3;
+                    ambiance.play().catch(function(e) { console.warn("Ambiance play failed."); });
+                }
+            } catch (e) {}
+
+            gameActive = true;
+            isPaused = false;
+            score = 0;
+            playerMissilesFired = 0;
+            pointsGained = 0;
+            pointsLost = 0;
+            enemyIntelList = [];
+            
+            playerName = playerNameInput.value || "COMMANDER";
+
+            winModal.style.display = 'none';
+            gameOverModal.style.display = 'none'; 
+            startModal.style.display = 'none';
+            gameUiElements.forEach(function(el) { el.style.display = 'block'; });
+            
+            updateScore(0);
+            
+            resizeCanvas();
+            resetRound();
+            
+            updateFlightWingPanel();
+            
+            startNextWave();
+            
+            animate();
+        }
+        
+        function spawnSingleEnemy(personalityId, squadName, role) {
+            personalityId = personalityId || 'standard';
+            squadName = squadName || null;
+            role = role || 'default';
+
+            var targetAngle = Math.random() * 360;
+            var targetDistance = Math.random() * 0.05 + 0.9;
+            var target = new Blip(targetAngle, targetDistance, true);
+            
+            if (gameConfig && gameConfig.aiPersonalities) {
+                target.personality = gameConfig.aiPersonalities[personalityId];
+            }
+            if (!target.personality) {
+                target.personality = {
+                    personalityid: 'default',
+                    targetpriority: 'nearest',
+                    evasionprofile: 'standard',
+                    engagementrange: 0.3,
+                    minengagementscore: 1
+                };
+            }
+            
+            target.squadName = squadName;
+            target.role = role;
+
+            if (gameConfig && gameConfig.enemyAces) {
+                var aceData = gameConfig.enemyAces[target.displayName.toLowerCase()];
+                if (aceData) {
+                    target.lifetimeKills = parseInt(aceData.totalkills) || 0;
+                    target.maxHits = 3;
+                    target.flaresLeft = 5;
+                    VideoManager.play('ace_spawn');
+                }
+            }
+            
+            blips.push(target);
+            enemyIntelList.push(target);
+            return target;
+        }
+        
+        function startNextWave() {
+            while (currentWave < totalWaves && 
+                   (!waveConfig[currentWave] || waveConfig[currentWave] <= 0) && 
+                   (!squadronWaveConfig[currentWave] || squadronWaveConfig[currentWave].length === 0)) {
+                currentWave++;
+            }
+            
+            if (currentWave >= totalWaves) {
+                if (enemiesLeftInWave <= 0) {
+                     endGame(true);
+                }
+                return;
+            }
+
+            currentWave++;
+            var spawnDelay = 3000;
+            var useSquadronWaves = squadronWaveConfig.length > 0;
+            
+            waveReadout.textContent = currentWave + ' / ' + totalWaves;
+
+            AudioManager.play('alert');
+            VideoManager.play('new_wave');
+
+            if (useSquadronWaves) {
+                var waveString = squadronWaveConfig[currentWave - 1] || "";
+                var spawns = waveString.split(',').map(function(s) { return s.trim(); }).filter(function(s) { return s.length > 0; });
+                
+                enemiesLeftInWave = spawns.length;
+                hostilesReadout.textContent = enemiesLeftInWave;
+
+                var newWaveBlips = [];
+                var squadCounter = 0;
+
+                spawns.forEach(function(spawn, i) {
+                    var parts = spawn.split(':');
+                    var personalityId = parts[0];
+                    var role = parts[1];
+                    var squadName = personalityId;
+
+                    if (!role) {
+                        role = 'default';
+                        squadName = 'solo_' + (squadCounter++);
+                    }
+
+                    setTimeout(function() {
+                        var blip = spawnSingleEnemy(personalityId, squadName, role);
+                        newWaveBlips.push(blip);
+
+                        if (newWaveBlips.length === spawns.length) {
+                            newWaveBlips.forEach(function(b) {
+                                if (b.role === 'wingman') {
+                                    b.leader = newWaveBlips.find(function(l) { return l.squadName === b.squadName && l.role === 'leader'; });
+                                }
+                            });
+                        }
+                    }, spawnDelay + (i * 1000));
+                });
+                
+            } else {
+                enemiesLeftInWave = waveConfig[currentWave - 1]; 
+                hostilesReadout.textContent = enemiesLeftInWave;
+                
+                for (var i = 0; i < enemiesLeftInWave; i++) {
+                    setTimeout(spawnSingleEnemy, spawnDelay + (i * 1000));
+                }
+            }
+        }
+
+
+        function resizeCanvas() {
+            var size = Math.min(container.clientWidth, container.clientHeight);
+            canvas.width = size;
+            canvas.height = size;
+            center = { x: canvas.width / 2, y: canvas.height / 2 };
+            radius = canvas.width / 2 * 0.85;
+        }
+
+        // --- Event Handlers ---
+        
+        function handleShipFire(shipId) {
+            if (!gameActive) {
+                return;
+            }
+            
+            var firingShip = friendlyFleet.find(function(s) { return s.id == shipId; });
+            
+            if (!firingShip) {
+                return;
+            }
+            
+            var target = firingShip.defensiveTargetBlip;
+            
+            if (firingShip.isFiringDefensiveMissile || firingShip.defensiveMissilesLeft <= 0 || !target || !blips.includes(target)) {
+                return;
+            }
+            
+            firingShip.isFiringDefensiveMissile = true;
+            firingShip.defensiveMissilesLeft--;
+            playerMissilesFired++;
+            AudioManager.play('missile_fire');
+            
+            var myCoords = firingShip.getCoords();
+            var myX = myCoords[0];
+            var myY = myCoords[1];
+            var missile = new DefensiveMissile(myX, myY, target, firingShip);
+            projectiles.push(missile);
+            
+            setTimeout(function() {
+                if (blips.includes(firingShip)) {
+                    firingShip.isFiringDefensiveMissile = false;
+                }
+            }, firingShip.reloadTime);
+            
+            updateWeaponsControlPanel();
+        }
+        
+        function getCoordsFromSector(sectorId) {
+            if (!sectorId || sectorId.length !== 2) return null;
+            
+            var sector = sectorId.charAt(0).toUpperCase();
+            var ring = parseInt(sectorId.charAt(1));
+
+            if (!SECTOR_ANGLES.hasOwnProperty(sector) || isNaN(ring) || ring < 1 || ring > 4) {
+                return null;
+            }
+            
+            var angle = SECTOR_ANGLES[sector];
+            var distance = (ring - 0.5) * (1 / 4);
+            
+            return { angle: angle, distance: distance };
+        }
+
+        function getSectorFromCoords(x, y) {
+            var dx = x - center.x;
+            var dy = y - center.y;
+            
+            var distPercent = Math.sqrt(dx*dx + dy*dy) / radius;
+            var ring;
+            if (distPercent < 0.25) ring = 1;
+            else if (distPercent < 0.5) ring = 2;
+            else if (distPercent < 0.75) ring = 3;
+            else ring = 4;
+
+            var mathAngle = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+            var sectorIndex = Math.floor((mathAngle + 22.5) / 45) % 8;
+            var sector = SECTOR_NAMES[sectorIndex];
+            
+            return '' + sector + ring;
+        }
+        
+        function handleSectorCommand(event) {
+            if (event.key !== 'Enter') return;
+            
+            var input = event.target;
+            var unitId = input.id;
+            var sectorId = input.value.toUpperCase();
+
+            var coords = getCoordsFromSector(sectorId);
+            
+            if (!coords) {
+                AudioManager.play('alert');
+                input.value = "";
+                return;
+            }
+
+            var parts = unitId.split('-');
+            var unitType = parts[1];
+            var id = parseInt(parts[2]);
+
+            if (unitType === 'ship') {
+                var ship = friendlyFleet.find(function(s) { return s.id === id; });
+                if (ship) {
+                    ship.targetCourse = coords.angle;
+                    ship.targetDistance = coords.distance;
+                    AudioManager.play('click');
+                    input.blur();
+                }
+            } else if (unitType === 'jet') {
+                var jet = fighterWing.find(function(j) { return j.id === id; });
+                if (jet) {
+                    if (jet.state === 'ready') {
+                        jet.assignedSector = sectorId;
+                        jet.state = 'patrolling';
+                        var newJetBlip = new FighterJet(0, 0, jet.id, sectorId);
+                        jet.blip = newJetBlip;
+                        blips.push(newJetBlip);
+                    } else if (jet.state === 'patrolling') {
+                        jet.assignedSector = sectorId;
+                        var newCoords = getCoordsFromSector(sectorId);
+                        jet.blip.targetCourse = newCoords.angle;
+                        jet.blip.targetDistance = newCoords.distance;
+                    }
+                    AudioManager.play('click');
+                    input.blur();
+                }
+            }
+        }
+        
+        function updateFighterWingTimers() {
+            fighterWing.forEach(function(jet) {
+                if (jet.state === 'patrolling' || jet.state === 'engaging' || jet.state === 'returning') {
+                    if (jet.fuel > 0) {
+                        jet.fuel--;
+                    }
+                }
+                
+                if (jet.state === 'refueling') {
+                    if (jet.refuelTimer > 0) {
+                        jet.refuelTimer--;
+                    } else {
+                        jet.state = 'ready';
+                        jet.fuel = fighterStats.fuel || 300;
+                        jet.ammo = fighterStats.ammo || 4;
+                    }
+                }
+            });
+        }
+
+        function updateScore(change) {
+            score += change;
+            dataScore.textContent = score;
+
+            if (change > 0) {
+                pointsGained += change;
+            } else if (change < 0) {
+                pointsLost += Math.abs(change);
+            }
+        }
+
+        function endGame(didWin) {
+            gameActive = false;
+            
+            document.getElementById('audio-ambiance').pause();
+
+            var baseScore = score;
+            var bonusPoints = 0;
+            var bonusHtml = '';
+
+            var shipsLost = fleetComposition.length - (friendlyFleet.length - 1); 
+            var shipPenalty = shipsLost * 500;
+            pointsLost += shipPenalty;
+            bonusHtml += '<p><span>Ships Lost (' + shipsLost + ')</span> <span class="summary-points-loss">-' + shipPenalty + '</span></p>';
+            
+            var missilesWasted = playerMissilesFired - pointsGained / 200;
+            var wastePenalty = missilesWasted > 0 ? missilesWasted * 10 : 0;
+            pointsLost += wastePenalty;
+            if (wastePenalty > 0) {
+                 bonusHtml += '<p><span>Missiles Wasted (' + missilesWasted + ')</span> <span class="summary-points-loss">-' + wastePenalty + '</span></p>';
+            }
+
+            if (didWin) {
+                if (shipsLost === 0) {
+                    bonusPoints += 1000;
+                    bonusHtml += '<p><span>No Ships Lost Bonus</span> <span class="summary-points-bonus">+1000</span></p>';
+                }
+
+                if (missilesWasted <= 0) {
+                    bonusPoints += 500;
+                    bonusHtml += '<p><span>Efficiency Bonus</span> <span class="summary-points-bonus">+500</span></p>';
+                }
+                
+                var diffMultipliers = { easy: 1.0, medium: 1.5, hard: 2.0 };
+                var multiplier = diffMultipliers[currentDifficulty] || 1.0;
+                
+                if (multiplier > 1.0) {
+                    var difficultyBonus = Math.floor(baseScore * (multiplier - 1));
+                    bonusPoints += difficultyBonus;
+                    bonusHtml += '<p><span>' + currentDifficulty.toUpperCase() + ' Bonus (x' + multiplier + ')</span> <span class="summary-points-bonus">+' + difficultyBonus + '</span></p>';
+                }
+            }
+
+            var finalScore = baseScore + bonusPoints - shipPenalty - wastePenalty;
+
+            if (didWin) {
+                finalScoreDisplay.textContent = finalScore;
+                winModal.style.display = 'flex';
+                winSummaryPanel.innerHTML = 
+                    '<p><span>Base Score</span> <span>' + baseScore + '</span></p>' +
+                    bonusHtml +
+                    '<p style="border-top: 1px dashed #aaa; padding-top: 10px;">' +
+                        '<span>Final Score</span> ' +
+                        '<span class="summary-points-gain">' + finalScore + '</span>' +
+                    '</p>';
+            } else {
+                gameOverScoreDisplay.textContent = finalScore;
+                gameOverModal.style.display = 'flex';
+                loseSummaryPanel.innerHTML = 
+                    '<p><span>Base Score</span> <span>' + baseScore + '</span></p>' +
+                    bonusHtml +
+                     '<p style="border-top: 1px dashed #aaa; padding-top: 10px;">' +
+                        '<span>Final Score</span> ' +
+                        '<span class="summary-points-gain">' + finalScore + '</span>' +
+                    '</p>';
+            }
+        }
+
+        function returnToStartScreen() {
+            winModal.style.display = 'none';
+            gameOverModal.style.display = 'none';
+            leaderboardModal.style.display = 'none';
+            pauseModal.style.display = 'none'; 
+            
+            gameActive = false; 
+            isPaused = false; 
+            
+            document.getElementById('audio-ambiance').pause();
+            videoCommsWindow.style.display = 'none';
+            videoPlayer.pause();
+            AudioManager.play('click');
+            
+            gameUiElements.forEach(function(el) { el.style.display = 'none'; });
+            startModal.style.display = 'flex';
+            
+            passcodeSection.style.display = 'block';
+            passcodeInput.value = '';
+            passcodeStatus.textContent = '';
+            playerInfoSection.classList.add('hidden');
+            difficultySelect.style.display = 'none';
+            
+            loadGameConfig();
+        }
+
+        function submitScore() {
+            var finalScore = 0;
+            var statusElement = null;
+            var submitButton = null;
+            var restartButton = null;
+
+            if (winModal.style.display === 'flex') {
+                finalScore = parseInt(finalScoreDisplay.textContent);
+                statusElement = winSubmitStatus;
+                submitButton = submitScoreWinButton;
+                restartButton = restartButtonWin;
+            } else if (gameOverModal.style.display === 'flex') {
+                finalScore = parseInt(gameOverScoreDisplay.textContent);
+                statusElement = loseSubmitStatus;
+                submitButton = submitScoreLoseButton;
+                restartButton = restartButtonLose;
+            }
+
+            if (!statusElement) return;
+
+            statusElement.textContent = 'Submitting score...';
+            submitButton.disabled = true;
+
+            fetch(APPS_SCRIPT_URL, {
+                method: 'POST',
+                mode: 'no-cors', 
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: 'addScore',
+                    name: playerName,
+                    score: finalScore,
+                    difficulty: currentDifficulty
+                }),
+            })
+            .then(function(response) {
+                statusElement.textContent = 'Score submitted!';
+                statusElement.style.color = '#00ff41';
+                submitButton.style.display = 'none';
+                restartButton.style.display = 'inline-block';
+            })
+            .catch(function(error) {
+                console.error('Error submitting score:', error);
+                statusElement.textContent = 'Submission failed.';
+                statusElement.style.color = '#ff4141';
+                submitButton.style.display = 'none';
+                restartButton.style.display = 'inline-block';
+            });
+        }
+
+        // --- UI Panel Updaters ---
+
+        function updateWeaponsControlPanel() {
+            var htmlContent = '';
+            var playerShips = friendlyFleet.filter(function(s) { return s.shipType !== 'Aircraft Carrier'; });
+            
+            playerShips.sort(function(a, b) { return a.id - b.id; });
+
+            for (var i = 0; i < playerShips.length; i++) {
+                var ship = playerShips[i];
+                var statusText = '';
+                var fireButtonHtml = '';
+                
+                var isAlive = blips.includes(ship);
+
+                if (isAlive) {
+                    if (ship.hits === 0) statusText = '<span class="status-good">Operational</span>';
+                    else if (ship.hits === 1) statusText = '<span class="status-damaged">Damaged</span>';
+                    else statusText = '<span class="status-critical">Critical</span>';
+                    
+                    var ammo = ship.defensiveMissilesLeft;
+                    var canFire = ammo > 0 && !ship.isFiringDefensiveMissile && ship.defensiveTargetBlip;
+                    var isReloading = ship.isFiringDefensiveMissile;
+                    
+                    var buttonClass = '';
+                    var buttonText = '';
+                    
+                    if (isReloading) {
+                        buttonClass = 'reloading';
+                        buttonText = 'RELOADING';
+                    } else if (canFire) {
+                        buttonClass = 'ready';
+                        buttonText = 'FIRE';
+                    } else if (ammo <= 0) {
+                        buttonClass = '';
+                        buttonText = 'NO AMMO';
+                    } else {
+                        buttonClass = '';
+                        buttonText = 'NO TARGET';
+                    }
+
+                    fireButtonHtml = 
+                        '<button class="ship-fire-button ' + buttonClass + '" onclick="handleShipFire(' + ship.id + ')">' +
+                            buttonText +
+                        '</button>';
+
+                } else {
+                    statusText = '<span class="status-destroyed">DESTROYED</span>';
+                    fireButtonHtml = '<span class="ship-fire-button">---</span>';
+                }
+
+                htmlContent += 
+                    '<p>' +
+                        '<span>' + ship.shipType.toUpperCase() + ' ' + ship.id + ': ' + statusText + '</span>' +
+                        fireButtonHtml +
+                    '</p>';
+            }
+            weaponsListContent.innerHTML = htmlContent;
+        }
+        
+        function updateNavigationPanel() {
+            var htmlContent = '';
+            var playerShips = friendlyFleet.filter(function(s) { return s.shipType !== 'Aircraft Carrier'; });
+            
+            playerShips.sort(function(a, b) { return a.id - b.id; });
+
+            for (var i = 0; i < playerShips.length; i++) {
+                var ship = playerShips[i];
+                var statusText = '';
+                var navControlsHtml = '';
+                
+                var isAlive = blips.includes(ship);
+
+                if (isAlive) {
+                    if (ship.hits === 0) statusText = '<span class="status-good">NAV OK</span>';
+                    else if (ship.hits === 1) statusText = '<span class="status-damaged">NAV Dmg</span>';
+                    else statusText = '<span class="status-critical">NAV Crit</span>';
+                } else {
+                    statusText = '<span class="status-destroyed">---</span>';
+                }
+
+                if (isAlive) {
+                    var currentSector = "--";
+                    if (document.activeElement.id !== 'sector-ship-' + ship.id) {
+                        var coords = ship.getCoords();
+                        currentSector = getSectorFromCoords(coords[0], coords[1]);
+                    }
+                    
+                    navControlsHtml = 
+                        '<div class="sector-controls-group">' +
+                            '<span>Sector:</span>' +
+                            '<input class="sector-input" id="sector-ship-' + ship.id + '" type="text" ' +
+                                   'placeholder="' + currentSector + '" maxlength="2" ' +
+                                   'onkeyup="handleSectorCommand(event)">' +
+                        '</div>';
+                } else {
+                    navControlsHtml = 
+                        '<div class="sector-controls-group">' +
+                            '<span>Sector:</span>' +
+                            '<input class="sector-input" id="sector-ship-' + ship.id + '" type="text" ' +
+                                   'placeholder="--" maxlength="2" ' +
+                                   'disabled>' +
+                        '</div>';
+                }
+
+                htmlContent += 
+                    '<p>' +
+                        '<span>' + ship.shipType.toUpperCase() + ' ' + ship.id + ': ' + statusText + '</span>' +
+                        navControlsHtml +
+                    '</p>';
+            }
+            navigationListContent.innerHTML = htmlContent;
+            
+            var activeInput = document.activeElement;
+            if (activeInput && activeInput.classList.contains('sector-input') && navigationListContent.contains(activeInput)) {
+                activeInput.focus();
+                var val = activeInput.value;
+                activeInput.value = '';
+                activeInput.value = val;
+            }
+        }
+
+        function updateFlightWingPanel() {
+            var htmlContent = '';
+            
+            fighterWing.sort(function(a, b) { return a.id - b.id; });
+
+            fighterWing.forEach(function(jet) {
+                var statusText = '';
+                var isInputDisabled = false;
+                
+                switch (jet.state) {
+                    case 'ready':
+                        statusText = '<span class="status-good">Ready</span> (F:' + jet.fuel + ' A:' + jet.ammo + ')';
+                        break;
+                    case 'patrolling':
+                        statusText = '<span class="status-ammo">Patrolling</span> (F:' + jet.fuel + ' A:' + jet.ammo + ')';
+                        break;
+                    case 'engaging':
+                        statusText = '<span class="status-critical">Engaging</span> (F:' + jet.fuel + ' A:' + jet.ammo + ')';
+                        break;
+                    case 'returning':
+                        statusText = '<span class="status-damaged">Returning</span> (F:' + jet.fuel + ' A:' + jet.ammo + ')';
+                        isInputDisabled = true;
+                        break;
+                    case 'refueling':
+                        statusText = '<span class="status-destroyed">Refueling (' + jet.refuelTimer + 's)</span>';
+                        isInputDisabled = true;
+                        break;
+                }
+
+                var sectorValue = jet.assignedSector || '';
+                
+                htmlContent += 
+                    '<p class="status-good">' +
+                        '<span>JET ' + jet.id + ': ' + statusText + '</span>' +
+                        '<div class="sector-controls-group">' +
+                            '<span>Sector:</span>' +
+                            '<input class="sector-input" id="sector-jet-' + jet.id + '" type="text" ' +
+                                   'placeholder="' + sectorValue + '" maxlength="2" ' +
+                                   'onkeyup="handleSectorCommand(event)" ' +
+                                   (isInputDisabled ? 'disabled' : '') + '>' +
+                        '</div>' +
+                    '</p>';
+            });
+            flightWingListContent.innerHTML = htmlContent;
+
+            var activeInput = document.activeElement;
+            if (activeInput && activeInput.classList.contains('sector-input') && flightWingListContent.contains(activeInput)) {
+                activeInput.focus();
+                var val = activeInput.value;
+                activeInput.value = '';
+                activeInput.value = val;
+            }
+        }
+
+
+        function showLeaderboard() {
+            AudioManager.play('click');
+            leaderboardModal.style.display = 'flex';
+            leaderboardStatus.textContent = 'Loading top scores...';
+            leaderboardTable.innerHTML = '';
+            
+            fetch(APPS_SCRIPT_URL + '?action=getScores')
+                .then(function(response) {
+                    return response.json();
+                })
+                .then(function(data) {
+                    if (data.status === 'success' && data.scores.length > 0) {
+                        leaderboardStatus.textContent = '';
+                        var tableHtml = 
+                            '<tr>' +
+                                '<th>Rank</th>' +
+                                '<th>Callsign</th>' +
+                                '<th>Score</th>' +
+                                '<th>Difficulty</th>' +
+                            '</tr>';
+                        data.scores.forEach(function(entry, index) {
+                            tableHtml += 
+                                '<tr>' +
+                                    '<td>' + (index + 1) + '</td>' +
+                                    '<td>' + entry.name + '</td>' +
+                                    '<td>' + entry.score + '</td>' +
+                                    '<td>' + entry.difficulty + '</td>' +
+                                '</tr>';
+                        });
+                        leaderboardTable.innerHTML = tableHtml;
+                    } else if (data.status === 'success') {
+                        leaderboardStatus.textContent = 'No scores submitted yet.';
+                    } else {
+                        throw new Error(data.message || 'Failed to fetch scores.');
+                    }
+                })
+                .catch(function(error) {
+                    console.error('Error loading leaderboard:', error);
+                    leaderboardStatus.textContent = 'Error loading scores.';
+                });
+        }
+
+        // --- v17.3 FIX: Re-wrote loadGameConfig to be ES5 compatible (removed async/await) ---
+        function loadGameConfig() {
+            loadingStatus.textContent = 'LOADING MISSION DATA...';
+            passcodeSubmit.disabled = true;
+            
+            fetch(APPS_SCRIPT_URL + '?action=getGameConfig')
+                .then(function(response) {
+                    if (!response.ok) {
+                        throw new Error('Network response was not ok');
+                    }
+                    return response.json();
+                })
+                .then(function(data) {
+                    if (data.status === 'success') {
+                        gameConfig = data.config;
+                        
+                        // --- Populate News Ticker ---
+                        if (gameConfig.newsTicker && gameConfig.newsTicker.length > 0) {
+                            newsTicker.innerHTML = gameConfig.newsTicker
+                                .map(function(item) {
+                                    // --- FIX: Robustly find the text (ES5 compatible) ---
+                                    var itemText = item.text || item.message || item.news || item[Object.keys(item)[0]];
+                                    return '<span>' + escapeHTML(String(itemText)) + '</span>';
+                                })
+                                .join('');
+                        } else {
+                            newsTicker.innerHTML = '<span>// NO COMMUNIQUES... //</span>';
+                        }
+                        
+                        loadingStatus.textContent = '';
+                        passcodeStatus.textContent = 'AWAITING AUTHORIZATION...';
+                        passcodeSubmit.disabled = false;
+                    } else {
+                        throw new Error(data.message || 'Invalid config structure.');
+                    }
+                })
+                .catch(function(error) {
+                    console.error('Error loading game config:', error);
+                    loadingStatus.textContent = 'Error: FAILED TO LOAD MISSION DATA.';
+                    loadingStatus.style.color = '#ff4141';
+                    passcodeStatus.textContent = 'CONNECTION FAILED.';
+                });
+        }
+        // --- END: v17.3 FIX ---
+
+        // --- v17.3 FIX: Re-wrote checkPasscode to be ES5 compatible (removed const/find/arrow func) ---
+        function checkPasscode() {
+            AudioManager.play('click');
+            var inputCode = passcodeInput.value.toLowerCase();
+            if (!gameConfig || !gameConfig.passcodes) {
+                passcodeStatus.textContent = 'Error: Config not loaded.';
+                return;
+            }
+
+            var validCode = gameConfig.passcodes[inputCode];
+            
+            if (validCode) {
+                passcodeStatus.textContent = 'Authorization Accepted. Welcome, Commander.';
+                passcodeStatus.style.color = '#00ff41';
+                passcodeSection.style.display = 'none';
+                
+                playerInfoSection.classList.remove('hidden');
+                difficultySelect.style.display = 'flex';
+
+                // --- FIX: Robustly find the difficulty (ES5 compatible) ---
+                var difficultyKey = null;
+                var keys = Object.keys(validCode);
+                for (var i = 0; i < keys.length; i++) {
+                    var k = keys[i];
+                    if (k.match(/diff|level/i)) {
+                        difficultyKey = k;
+                        break;
+                    }
+                }
+
+                var allowedDifficulty = (
+                    validCode.difficulty || 
+                    validCode.level || 
+                    (difficultyKey ? validCode[difficultyKey] : null) || 
+                    'easy'
+                ).toString().toLowerCase();
+                
+                startEasyButton.disabled = false;
+                startMediumButton.disabled = (allowedDifficulty === 'easy');
+                startHardButton.disabled = (allowedDifficulty === 'easy' || allowedDifficulty === 'medium');
+
+            } else {
+                passcodeStatus.textContent = 'Access Denied. Invalid Passcode.';
+                passcodeStatus.style.color = '#ff4141';
+                passcodeInput.value = '';
+            }
+        }
+        // --- END: v17.3 FIX ---
+
+        function escapeHTML(str) {
+            if (typeof str !== 'string') {
+                return '';
+            }
+            return str.replace(/[&<>"']/g, function(m) {
+                return {
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                }[m];
+            });
+        }
+        
+        // --- Global Event Listeners ---
+        window.addEventListener('resize', resizeCanvas);
+        
+        var blipSize = 3; 
+
+        var gameConfig = null;
+        var currentDifficulty = 'easy';
+        var playerName = 'COMMANDER';
+
+        var enemyMissileCount = 3;
+        var enemySpeedMultiplier = 1.0;
+        var playerMissileSpeedMultiplier = 1.0;
+        
+        startEasyButton.addEventListener('click', function() {
+            currentDifficulty = 'easy';
+            AudioManager.play('click');
+            startGame();
+        });
+        startMediumButton.addEventListener('click', function() {
+            currentDifficulty = 'medium';
+            AudioManager.play('click');
+            startGame();
+        });
+        startHardButton.addEventListener('click', function() {
+            currentDifficulty = 'hard';
+            AudioManager.play('click');
+            startGame();
+        });
+        
+        passcodeSubmit.addEventListener('click', checkPasscode);
+        passcodeInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') checkPasscode();
+        });
+
+        leaderboardButton.addEventListener('click', showLeaderboard);
+        leaderboardCloseButton.addEventListener('click', function() {
+             leaderboardModal.style.display = 'none';
+             AudioManager.play('click');
+        });
+        
+        restartButtonWin.addEventListener('click', returnToStartScreen);
+        restartButtonLose.addEventListener('click', returnToStartScreen);
+
+        submitScoreWinButton.addEventListener('click', submitScore);
+        submitScoreLoseButton.addEventListener('click', submitScore);
+        
+        pauseButton.addEventListener('click', function() {
+            isPaused = true;
+            pauseModal.style.display = 'flex';
+            AudioManager.play('click');
+        });
+        resumeButton.addEventListener('click', function() {
+            isPaused = false;
+            pauseModal.style.display = 'none';
+            AudioManager.play('click');
+            animate();
+        });
+        
+        exitButton.addEventListener('click', returnToStartScreen);
+
+
+        document.addEventListener('DOMContentLoaded', function() {
+            resizeCanvas();
+            drawGrid();
+            loadGameConfig();
+        });
+
+    </script>
+</body>
+</html>
